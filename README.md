@@ -78,7 +78,11 @@ the other "untested" IDs of the driver are not included).
   don't replace the existing ones.
 - The image has no `regulatory.db` either (`failed to load regulatory.db` in
   the kernel log at boot): `firmware/regulatory.db` and its signature go in
-  `/lib/firmware-system/`.
+  `/lib/firmware-system/`. It is the 2023.09.01 release on purpose: the Dwarf
+  kernel (6.1) only trusts the signing key of the former maintainer
+  (`sforshee`), the later releases are signed by the new one (`wens`) and the
+  kernel rejects them (`loaded regulatory.db is malformed or signature is
+  missing/invalid`).
 - The firmware files are unmodified copies from
   [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/rtlwifi),
   where `WHENCE` lists all of them as "Redistributable". They are distributed
@@ -311,7 +315,8 @@ third-party files, redistributed unmodified under their own licences.
   licence is `LICENSES/LICENCE.rtlwifi_firmware.txt` of the same repository.
 - `firmware/regulatory.db` and `.p7s`: from the
   [wireless-regdb](https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git)
-  release 2026.09.03, the licence is its `LICENSE`.
+  release 2023.09.01, the last one signed with the key the Dwarf kernel trusts
+  (see *Supported chips*); the licence is its `LICENSE`.
 - `firmware/SHA256SUMS` lists the checksums of all of them
   (`cd firmware && sha256sum -c SHA256SUMS`), to compare them with the
   upstream files.
