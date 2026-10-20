@@ -16,6 +16,7 @@ without a router.
 | `scripts/wifi-ap-helper` | data commands of `wifi-ap` (Python 3.4), installed in `/usr/lib/alabs-mod-wifi/` |
 | `diagnostics/50-wifi` | WiFi section of the diagnostics report, for [alabs-mod-diagnostics-logs](../alabs-mod-diagnostics-logs), installed in `/usr/lib/diagnostics-logs/providers.d/` |
 | `VERSION` | alabs-mod-wifi version, installed in `/usr/lib/alabs-mod-wifi/` |
+| `Makefile` | `make release`: binary release for the aLabs image, see [Binary release](#binary-release) |
 | `systemd/` | `wifi-ap.path` + `wifi-ap.service`: run the requests of the HMI as root |
 | `tmpfiles.d/` | creates `/run/wifi-ap/request`, writable by the HMI |
 | `docs/` | [manual setup of a USB dongle](docs/usb-wifi-dongles.md) and [how the driver was backported](docs/driver-backport.md) |
@@ -59,9 +60,25 @@ the other "untested" IDs of the driver are not included).
 
 - *Max AP clients* is what the driver reports to mac80211
   (`max_macid_num - 1`); for the RTL8188EU it is limited to 1 by `0002`.
-- The Dwarf image has no `rtlwifi` firmware: all the files above are in
-  `firmware/rtlwifi/` and must be installed in `/lib/firmware/rtlwifi/`,
-  otherwise the module binds the device but the probe fails.
+- Firmware location on the Dwarf: the kernel also looks in
+  `/lib/firmware-system/`, where the image keeps its firmware; `/lib/firmware`
+  is a link to `/data/firmware`, on the data partition, and is left to the user.
+  Without its firmware the module binds the device but the probe fails.
+- The Dwarf image (v1.13.5.3315) already has most of the files above in
+  `/lib/firmware-system/rtlwifi/`, compared with `firmware/rtlwifi/`:
+
+  | File | Dwarf image | `firmware/rtlwifi/` |
+  |---|---|---|
+  | `rtl8188eufw.bin` | v11.1 | v28.0, **not tested on the Dwarf** |
+  | `rtl8188fufw.bin`, `rtl8192eu_nic.bin`, `rtl8723aufw_A.bin`, `rtl8723aufw_B.bin`, `rtl8723aufw_B_NoBT.bin`, `rtl8723bu_nic.bin` | identical | identical |
+  | `rtl8192fufw.bin`, `rtl8710bufw_SMIC.bin`, `rtl8710bufw_UMC.bin` | missing | included |
+
+  All the tests on the Dwarf, and the patches `0003`-`0005`, were done with
+  the v11.1 RTL8188EU firmware of the image: install only the missing files,
+  don't replace the existing ones.
+- The image has no `regulatory.db` either (`failed to load regulatory.db` in
+  the kernel log at boot): `firmware/regulatory.db` and its signature go in
+  `/lib/firmware-system/`.
 - The firmware files are unmodified copies from
   [linux-firmware](https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/tree/rtlwifi),
   where `WHENCE` lists all of them as "Redistributable". They are distributed
@@ -89,11 +106,59 @@ can be overridden from the environment.
 
 ### Install
 
+The module goes in `updates/`, which takes precedence over the original
+`rtl8xxxu.ko` of the image; the firmware missing from the image and the
+regulatory database go in `/lib/firmware-system/` (see the notes above):
+
 ```
 scp -O driver/out/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
+ssh root@192.168.51.1 depmod -a
+cd firmware
+scp -O rtlwifi/rtl8192fufw.bin rtlwifi/rtl8710bufw_SMIC.bin rtlwifi/rtl8710bufw_UMC.bin \
+    rtlwifi/LICENCE.rtlwifi_firmware.txt root@192.168.51.1:/lib/firmware-system/rtlwifi/
+scp -O regulatory.db regulatory.db.p7s LICENSE.wireless-regdb root@192.168.51.1:/lib/firmware-system/
 ```
 
+The root filesystem of the Dwarf is read only: `mount / -o remount,rw` first.
+
 On the Dwarf, `iw list` must show `* AP` among the supported interface modes.
+
+### Binary release
+
+The aLabs image doesn't build the driver: it installs a binary release of this
+repository, so the image always gets exactly the module and the files
+published on GitHub.
+
+```
+make release
+```
+
+builds the module (`make module`: `driver/build.sh` run with `docker exec` in
+the container that has the Dwarf kernel tree, `CONTAINER=nam` by default) and
+packs `dist/alabs-mod-wifi-<version>-<platform>.tar.gz` and its `.sha256`
+(`PLATFORM=moddwarf` by default, the only one supported for now; the image
+downloads the archive of its own platform). It
+refuses to run with uncommitted or untracked files: the archive records the
+commit it was made from, whose sources are the sources of the module.
+
+The archive is an overlay of the Dwarf root filesystem (owner root, final
+paths and permissions), to be extracted with `tar -xpf` and followed by
+`depmod`:
+
+| Path | Content |
+|---|---|
+| `usr/lib/modules/6.1.15-rt7-moddwarf/updates/` | `rtl8xxxu.ko` |
+| `usr/lib/firmware-system/rtlwifi/` | the firmware missing from the image and its licence |
+| `usr/lib/firmware-system/` | `regulatory.db`, `regulatory.db.p7s` and their licence |
+| `usr/bin/` | `wifi-ap` |
+| `usr/lib/alabs-mod-wifi/` | `wifi-ap-helper`, `VERSION`, `LICENSE`, `BUILDINFO` (commit, kernel, vermagic, sha256 of the module) |
+| `etc/systemd/system/` | `wifi-ap.path`, `wifi-ap.service`, enabled in `multi-user.target.wants/` |
+| `etc/tmpfiles.d/` | `wifi-ap.conf` |
+| `usr/lib/diagnostics-logs/providers.d/` | `50-wifi` |
+
+To publish a version: update `VERSION`, commit, tag it `v<version>`, run
+`make release`, push the tag and attach the two files of `dist/` to the GitHub
+release of that tag.
 
 ## wifi-ap
 
@@ -252,5 +317,5 @@ third-party files, redistributed unmodified under their own licences.
   upstream files.
 
 When the image is built, each licence file is installed with its files:
-`LICENCE.rtlwifi_firmware.txt` in `/lib/firmware/rtlwifi/`,
-`LICENSE.wireless-regdb` in `/lib/firmware/` next to `regulatory.db`.
+`LICENCE.rtlwifi_firmware.txt` in `/lib/firmware-system/rtlwifi/`,
+`LICENSE.wireless-regdb` in `/lib/firmware-system/` next to `regulatory.db`.

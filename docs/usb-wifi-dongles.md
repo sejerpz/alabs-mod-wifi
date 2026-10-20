@@ -83,8 +83,12 @@ The module is built for the Dwarf kernel `6.1.15-rt7-moddwarf`
 | File | Installed to |
 |---|---|
 | `driver/out/rtl8xxxu.ko` | `/lib/modules/6.1.15-rt7-moddwarf/updates/` |
-| `firmware/rtlwifi/*` (firmware and licence) | `/lib/firmware/rtlwifi/` |
-| `firmware/regulatory.db`, `regulatory.db.p7s` | `/lib/firmware/` |
+| `firmware/rtlwifi/rtl8192fufw.bin`, `rtl8710bufw_SMIC.bin`, `rtl8710bufw_UMC.bin` and the licence | `/lib/firmware-system/rtlwifi/` |
+| `firmware/regulatory.db`, `regulatory.db.p7s` and the licence | `/lib/firmware-system/` |
+
+The other firmware files are already in the image, in `/lib/firmware-system/rtlwifi/`:
+don't replace them (see *Supported chips* in the README). `/lib/firmware` is a
+link to `/data/firmware`, on the data partition: don't put the firmware there.
 
 First check that your Dwarf runs the right kernel:
 
@@ -99,15 +103,16 @@ It must print `6.1.15-rt7-moddwarf`. With any other kernel the module will not l
 
    ```bash
    mount / -o remount,rw
-   mkdir -p /lib/modules/$(uname -r)/updates /lib/firmware/rtlwifi
+   mkdir -p /lib/modules/$(uname -r)/updates
    ```
 
 3. From your PC, in the repository root, copy the files:
 
    ```bash
    scp -O driver/out/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
-   scp -O firmware/rtlwifi/* root@192.168.51.1:/lib/firmware/rtlwifi/
-   scp -O firmware/regulatory.db firmware/regulatory.db.p7s root@192.168.51.1:/lib/firmware/
+   scp -O firmware/rtlwifi/rtl8192fufw.bin firmware/rtlwifi/rtl8710bufw_SMIC.bin firmware/rtlwifi/rtl8710bufw_UMC.bin \
+       firmware/rtlwifi/LICENCE.rtlwifi_firmware.txt root@192.168.51.1:/lib/firmware-system/rtlwifi/
+   scp -O firmware/regulatory.db firmware/regulatory.db.p7s firmware/LICENSE.wireless-regdb root@192.168.51.1:/lib/firmware-system/
    ```
 
 4. On the Dwarf, update the module list and load the driver:
@@ -178,8 +183,8 @@ The USB cable connection (`192.168.51.1`) keeps working as before.
 |---|---|
 | `modprobe rtl8xxxu` fails with `Invalid module format` | The module does not match your kernel: check `uname -r`. |
 | No `wlan0`, `dmesg` shows `probe of ... failed` | Unplug and replug the dongle. Some dongles need more current than the port gives: try a powered USB hub. |
-| `Direct firmware load for rtlwifi/... failed with error -2` | Firmware missing: copy `firmware/rtlwifi/*` again. |
-| `cfg80211: failed to load regulatory.db` | Harmless. Copy `firmware/regulatory.db*` to `/lib/firmware/` to install the regulatory database. |
+| `Direct firmware load for rtlwifi/... failed with error -2` | Firmware missing: copy the file named in the message from `firmware/rtlwifi/` to `/lib/firmware-system/rtlwifi/`. |
+| `cfg80211: failed to load regulatory.db` | Harmless. Copy `firmware/regulatory.db*` to `/lib/firmware-system/` to install the regulatory database. |
 | `wlan0` exists but does not connect | Check SSID and password in `/data/wpa_supplicant.conf`. `iw dev wlan0 scan \| grep SSID` lists the networks the dongle sees. |
 | Audio dropouts with Wi-Fi active | Wi-Fi traffic uses CPU. Avoid heavy transfers while playing, or unplug the dongle on stage. |
 

@@ -130,12 +130,14 @@ It must print `vermagic=6.1.15-rt7-moddwarf SMP preempt_rt mod_unload aarch64`.
 ```bash
 # on the Dwarf, dongle unplugged
 mount / -o remount,rw
-mkdir -p /lib/modules/6.1.15-rt7-moddwarf/updates /lib/firmware/rtlwifi
+mkdir -p /lib/modules/6.1.15-rt7-moddwarf/updates
 
-# from the PC
+# from the PC: only the firmware missing from the image, in /lib/firmware-system
+# (/lib/firmware is /data/firmware, see the README)
 scp -O driver/out/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
-scp -O firmware/rtlwifi/* root@192.168.51.1:/lib/firmware/rtlwifi/
-scp -O firmware/regulatory.db firmware/regulatory.db.p7s root@192.168.51.1:/lib/firmware/
+scp -O firmware/rtlwifi/rtl8192fufw.bin firmware/rtlwifi/rtl8710bufw_SMIC.bin firmware/rtlwifi/rtl8710bufw_UMC.bin \
+    firmware/rtlwifi/LICENCE.rtlwifi_firmware.txt root@192.168.51.1:/lib/firmware-system/rtlwifi/
+scp -O firmware/regulatory.db firmware/regulatory.db.p7s firmware/LICENSE.wireless-regdb root@192.168.51.1:/lib/firmware-system/
 
 # on the Dwarf
 depmod -a
