@@ -1,0 +1,57 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# diagnostics-logs provider: wifi (see the alabs-mod-diagnostics-logs project)
+#
+# Installed in /usr/lib/diagnostics-logs/providers.d/. Never prints the
+# configuration files: they contain the passwords. Network names are declared
+# in $ALABS_DIAG_REDACT, so the report can be anonymized.
+
+if [ "$1" = "--describe" ]; then
+    echo "id=wifi"
+    echo "title=WiFi"
+    echo "description=WiFi adapter, driver, access point state and logs (alabs-mod-wifi)"
+    exit 0
+fi
+
+redact()
+{
+    [ -n "$2" ] && [ -n "$ALABS_DIAG_REDACT" ] && printf '%s\t%s\n' "$1" "$2" >> "$ALABS_DIAG_REDACT"
+}
+
+# network names that can show up below: configured client networks and
+# access point (wifi-ap names, it never prints passwords), current network
+wifi-ap names 2>/dev/null | while IFS= read -r ssid; do redact ssid "$ssid"; done
+redact ssid "$(iw dev wlan0 info 2>/dev/null | sed -n 's/^[[:space:]]*ssid //p')"
+redact ssid "$(iw dev wlan0 link 2>/dev/null | sed -n 's/^[[:space:]]*SSID: //p')"
+
+wifi-ap info --text
+echo "status:          $(wifi-ap status)"
+
+echo
+echo "units:"
+for unit in wifi-ap.path wpa-supplicant-wlan0.service dhcpcd-wlan0.service dnsmasq.service; do
+    printf '  %-30s %s\n' "$unit" "$(systemctl is-active $unit 2>/dev/null)"
+done
+
+echo
+echo "kernel log (last 40 lines about the WiFi adapter):"
+dmesg 2>/dev/null | grep -iE "rtl8xxxu|wlan0|cfg80211|ieee80211|phy[0-9]" | tail -40
+
+# journalctl 219 fails when -t and -u are combined and nothing matches:
+# one call per source, without the "-- Logs begin" header
+journal()
+{
+    local lines
+    echo
+    echo "journal $2 (last 15 lines):"
+    lines=$(journalctl -b --no-pager -o short-monotonic -n 15 "$1" "$2" 2>/dev/null | grep -v '^-- ')
+    echo "${lines:-  none}"
+}
+
+journal -t wifi-ap
+journal -u wifi-ap.service
+journal -u wpa-supplicant-wlan0.service
+journal -u dhcpcd-wlan0.service
+
+exit 0

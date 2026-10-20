@@ -1,0 +1,95 @@
+Subject: [PATCH] rtl8xxxu: send the beacon again if the chip did not get it
+
+When BCN_VALID is still clear after ~20ms the new beacon was lost on
+the USB link (or is stuck behind a long queue of frames), and the chip
+sends no beacons until the next beacon update: stations may lose the AP.
+
+Send the beacon again, up to 3 attempts, before giving up. A beacon that
+needed more than one attempt is logged at info level.
+
+Applies on top of 0004.
+---
+--- a/rtl8xxxu_core.c
++++ b/rtl8xxxu_core.c
+@@ -5677,42 +5677,52 @@
+ 				       struct ieee80211_vif *vif)
+ {
+ 	struct rtl8xxxu_priv *priv = hw->priv;
+-	struct sk_buff *skb = ieee80211_beacon_get(hw, vif, 0);
+ 	struct device *dev = &priv->udev->dev;
+-	int retry;
++	struct sk_buff *skb;
++	int retry, attempt;
+ 	u8 val8;
+ 
+-	/* BCN_VALID, write 1 to clear, cleared by SW */
+-	val8 = rtl8xxxu_read8(priv, REG_TDECTRL + 2);
+-	val8 |= BIT_BCN_VALID >> 16;
+-	rtl8xxxu_write8(priv, REG_TDECTRL + 2, val8);
+-
+-	/* SW_BCN_SEL - Port0 */
+-	val8 = rtl8xxxu_read8(priv, REG_DWBCN1_CTRL_8723B + 2);
+-	val8 &= ~(BIT_SW_BCN_SEL >> 16);
+-	rtl8xxxu_write8(priv, REG_DWBCN1_CTRL_8723B + 2, val8);
+-
+-	if (skb)
+-		rtl8xxxu_tx(hw, NULL, skb);
+-
+ 	/*
+ 	 * The beacon shares the USB bulk endpoint with the other frames, so
+-	 * under load it can reach the chip several ms later: wait up to
+-	 * ~20ms (the beacon interval is ~100ms) instead of ~2ms.
++	 * under load it can reach the chip several ms later, and on a flaky
++	 * USB link it can be lost: until BCN_VALID is set again the chip
++	 * sends no beacons. Wait up to ~20ms (the beacon interval is
++	 * ~100ms) and send the beacon again if it did not arrive.
+ 	 */
+-	retry = 100;
+-	do {
++	for (attempt = 0; attempt < 3; attempt++) {
++		skb = ieee80211_beacon_get(hw, vif, 0);
++		if (!skb)
++			return;
++
++		/* BCN_VALID, write 1 to clear, cleared by SW */
+ 		val8 = rtl8xxxu_read8(priv, REG_TDECTRL + 2);
+-		if (val8 & (BIT_BCN_VALID >> 16))
+-			break;
+-		usleep_range(100, 200);
+-	} while (--retry);
+-
+-	if (!retry)
+-		dev_err(dev, "%s: Failed to read beacon valid bit\n", __func__);
+-	else if (retry < 90)
+-		dev_dbg(dev, "%s: beacon valid after %d polls\n", __func__,
+-			100 - retry);
++		val8 |= BIT_BCN_VALID >> 16;
++		rtl8xxxu_write8(priv, REG_TDECTRL + 2, val8);
++
++		/* SW_BCN_SEL - Port0 */
++		val8 = rtl8xxxu_read8(priv, REG_DWBCN1_CTRL_8723B + 2);
++		val8 &= ~(BIT_SW_BCN_SEL >> 16);
++		rtl8xxxu_write8(priv, REG_DWBCN1_CTRL_8723B + 2, val8);
++
++		rtl8xxxu_tx(hw, NULL, skb);
++
++		retry = 100;
++		do {
++			val8 = rtl8xxxu_read8(priv, REG_TDECTRL + 2);
++			if (val8 & (BIT_BCN_VALID >> 16))
++				break;
++			usleep_range(100, 200);
++		} while (--retry);
++
++		if (retry) {
++			if (attempt)
++				dev_info(dev, "%s: beacon sent at attempt %d\n",
++					 __func__, attempt + 1);
++			return;
++		}
++	}
++
++	dev_err(dev, "%s: Failed to read beacon valid bit\n", __func__);
+ }
+ 
+ static void rtl8xxxu_update_beacon_work_callback(struct work_struct *work)

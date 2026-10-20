@@ -1,0 +1,57 @@
+Subject: [PATCH] rtl8xxxu: retry the whole firmware download on failure
+
+The chip computes the firmware download checksum on every byte it
+receives. When a block write fails with a USB error (e.g. -EPROTO) the
+data may have been written anyway, so the per-block retry added by 0001
+makes the chip count it twice: the checksum poll times out and the
+probe fails with -EAGAIN, leaving the device without wlan0.
+
+Retry download + start of the firmware up to 3 times when they fail
+with -EAGAIN; download_firmware already resets the MCU if a previous
+attempt left the firmware RAM selected.
+
+Applies on top of 0002.
+---
+--- a/rtl8xxxu_core.c
++++ b/rtl8xxxu_core.c
+@@ -4051,7 +4051,7 @@
+ 	struct device *dev = &priv->udev->dev;
+ 	struct rtl8xxxu_fileops *fops = priv->fops;
+ 	bool macpower;
+-	int ret;
++	int ret, fw_try;
+ 	u8 val8;
+ 	u16 val16;
+ 	u32 val32;
+@@ -4091,12 +4091,25 @@
+ 	 */
+ 	rtl8xxxu_write16(priv, REG_TRXFF_BNDY + 2, fops->trxff_boundary);
+ 
+-	ret = rtl8xxxu_download_firmware(priv);
+-	dev_dbg(dev, "%s: download_firmware %i\n", __func__, ret);
+-	if (ret)
+-		goto exit;
+-	ret = rtl8xxxu_start_firmware(priv);
+-	dev_dbg(dev, "%s: start_firmware %i\n", __func__, ret);
++	/*
++	 * The firmware download checksum is computed by the chip on every
++	 * byte it receives: when a block write is retried after a USB error
++	 * (the data may have been written anyway) the checksum is wrong and
++	 * the firmware does not start. Retry the whole download instead.
++	 */
++	for (fw_try = 0; fw_try < 3; fw_try++) {
++		ret = rtl8xxxu_download_firmware(priv);
++		dev_dbg(dev, "%s: download_firmware %i\n", __func__, ret);
++		if (!ret) {
++			ret = rtl8xxxu_start_firmware(priv);
++			dev_dbg(dev, "%s: start_firmware %i\n", __func__, ret);
++		}
++		if (ret != -EAGAIN)
++			break;
++
++		dev_info(dev, "%s: firmware load failed, retrying (%i)\n",
++			 __func__, fw_try + 1);
++	}
+ 	if (ret)
+ 		goto exit;
+ 

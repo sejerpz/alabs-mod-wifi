@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Unit]
+Description=WiFi access point requests from the HMI
+
+[Path]
+# written by "wifi-ap on|off" when run as the unprivileged hmi user
+PathChanged=/run/wifi-ap/request
+
+[Install]
+WantedBy=multi-user.target

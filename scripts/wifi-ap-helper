@@ -1,0 +1,786 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# wifi-ap-helper - data commands of wifi-ap that need structured output
+#
+#   wifi-ap-helper info [--text]   WiFi adapter information, as JSON (or text)
+#   wifi-ap-helper state           everything the web UI shows, as JSON
+#   wifi-ap-helper networks-set    save the client networks (JSON on stdin)
+#   wifi-ap-helper scan            visible networks, as JSON (client mode only)
+#   wifi-ap-helper ap-set          save the access point settings (JSON on stdin)
+#   wifi-ap-helper names           configured network names, one per line
+#
+# Called by "wifi-ap <command>"; installed in /usr/lib/alabs-mod-wifi/. Must run as
+# root. Runs on the Python 3.4 of the Dwarf: no f-strings, no subprocess.run,
+# no bytes.hex().
+
+import binascii
+import hashlib
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+IFACE = 'wlan0'
+VERSION_FILE = '/usr/lib/alabs-mod-wifi/VERSION'
+
+# WIFI_AP_DATA_DIR is for testing only
+DATA_DIR = os.environ.get('WIFI_AP_DATA_DIR', '/data')
+WPA_CONF = os.path.join(DATA_DIR, 'wpa_supplicant.conf')
+AP_CONF = os.path.join(DATA_DIR, 'wifi-ap.conf')
+WPA_CTRL_DIR = '/var/run/wpa_supplicant'
+CLIENT_UNITS = ['wpa-supplicant-wlan0.service', 'dhcpcd-wlan0.service']
+
+# same defaults as wifi-ap
+AP_DEFAULTS = {'ssid': 'moddwarf', 'password': 'moddwarf', 'channel': 6}
+
+# header of a new /data/wpa_supplicant.conf, as /etc/wpa_supplicant.conf
+WPA_CONF_HEADER = ['ctrl_interface=%s' % WPA_CTRL_DIR, 'ap_scan=1']
+
+
+def read_file(path, default=''):
+    try:
+        with open(path, 'r') as fh:
+            return fh.read().strip()
+    except (IOError, OSError):
+        return default
+
+
+def run(args, keep_failed=False):
+    """stdout of a command, '' if it fails (unless keep_failed)."""
+    try:
+        out = subprocess.check_output(args, stderr=subprocess.DEVNULL, timeout=5)
+    except subprocess.CalledProcessError as e:
+        out = e.output if keep_failed else b''
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+    return out.decode('utf-8', 'replace')
+
+
+def kernel_log():
+    log = run(['dmesg'])
+    if not log:
+        log = run(['journalctl', '-k', '-b', '--no-pager', '-o', 'cat'])
+    return log
+
+
+def usb_info(netdev):
+    """USB device of the interface: the parent of the USB interface."""
+    link = os.path.join(netdev, 'device')
+    if not os.path.exists(link):
+        return {}
+    intf = os.path.realpath(link)
+    dev = os.path.dirname(intf)
+    if not os.path.exists(os.path.join(dev, 'idVendor')):
+        return {}
+    return {
+        'id': '%s:%s' % (read_file(os.path.join(dev, 'idVendor')), read_file(os.path.join(dev, 'idProduct'))),
+        'manufacturer': read_file(os.path.join(dev, 'manufacturer')),
+        'product': read_file(os.path.join(dev, 'product')),
+        'port': os.path.basename(dev),
+        'speed': read_file(os.path.join(dev, 'speed')),
+    }
+
+
+def chip_info(log, port):
+    """Chip and firmware, from the rtl8xxxu messages of the USB port."""
+    info = {}
+    prefix = 'usb %s: ' % port
+    for line in log.splitlines():
+        # strip the "[   4.842722] " timestamp of dmesg
+        line = re.sub(r'^\[[^\]]*\]\s*', '', line)
+        if not line.startswith(prefix):
+            continue
+        msg = line[len(prefix):]
+        # "RTL8188EU rev D (TSMC) romver 0, 1T1R, TX queues 2, WiFi=1, BT=0, GPS=0, HI PA=0"
+        m = re.match(r'(RTL\w+ rev \w+(?: \([^)]*\))?) romver \S+, (\dT\dR)', msg)
+        if m:
+            info['chip'] = m.group(1)
+            info['paths'] = m.group(2)
+        # "Firmware revision 11.1 (signature 0x88e1)"
+        m = re.match(r'Firmware revision (\S+)', msg)
+        if m:
+            info['firmware'] = m.group(1)
+    return info
+
+
+def driver_info(netdev):
+    info = {}
+    link = os.path.join(netdev, 'device', 'driver')
+    if not os.path.exists(link):
+        return info
+    info['name'] = os.path.basename(os.path.realpath(link))
+    path = run(['modinfo', '-F', 'filename', info['name']]).strip()
+    info['module'] = path
+    info['alabs_mod_wifi'] = '/updates/' in path
+    # the module has no srcversion: identify the build by its file
+    try:
+        with open(path, 'rb') as fh:
+            info['build'] = hashlib.sha1(fh.read()).hexdigest()[:12]
+    except (IOError, OSError):
+        info['build'] = ''
+    return info
+
+
+def phy_info(netdev):
+    """Supported modes, AP clients and channels, from "iw phy <phy> info"."""
+    phy = read_file(os.path.join(netdev, 'phy80211', 'name'))
+    info = {'modes': [], 'channels': [], 'ap_channels': [], 'max_ap_clients': None}
+    if not phy:
+        return info
+
+    section = None
+    for line in run(['iw', 'phy', phy, 'info']).splitlines():
+        stripped = line.strip()
+        if stripped.startswith('Supported interface modes'):
+            section = 'modes'
+            continue
+        if stripped.startswith('Frequencies'):
+            section = 'freqs'
+            continue
+        if not stripped.startswith('*'):
+            section = None if not line.startswith('\t\t') else section
+
+        m = re.match(r'Maximum associated stations in AP mode: (\d+)', stripped)
+        if m:
+            info['max_ap_clients'] = int(m.group(1))
+
+        if section == 'modes' and stripped.startswith('* '):
+            info['modes'].append(stripped[2:])
+        elif section == 'freqs' and stripped.startswith('* '):
+            # "* 2412 MHz [1] (20.0 dBm)" or "... (disabled)"
+            m = re.match(r'\* (\d+)(?:\.\d+)? MHz \[(\d+)\]', stripped)
+            if m and 'disabled' not in stripped:
+                info['channels'].append(int(m.group(2)))
+                # an AP can't be started where initiating radiation is not allowed
+                if not re.search(r'no IR|passive scan|no IBSS|radar', stripped):
+                    info['ap_channels'].append(int(m.group(2)))
+    return info
+
+
+def current_info():
+    """Current mode, network and link of the interface."""
+    info = {}
+    for line in run(['iw', 'dev', IFACE, 'info']).splitlines():
+        key, sep, value = line.strip().partition(' ')
+        if key == 'type':
+            info['mode'] = value
+        elif key == 'ssid':
+            info['ssid'] = value
+        elif key == 'channel':
+            info['channel'] = value
+
+    if info.get('mode') == 'managed':
+        for line in run(['iw', 'dev', IFACE, 'link']).splitlines():
+            key, sep, value = line.strip().partition(':')
+            if key in ('signal', 'tx bitrate', 'rx bitrate'):
+                info[key.replace(' ', '_')] = value.strip()
+            elif key == 'SSID':
+                info['ssid'] = value.strip()
+    elif info.get('mode') == 'AP':
+        stations = []
+        station = None
+        for line in run(['iw', 'dev', IFACE, 'station', 'dump']).splitlines():
+            if line.startswith('Station '):
+                station = {'mac': line.split()[1]}
+                stations.append(station)
+                continue
+            key, sep, value = line.strip().partition(':')
+            if station is not None and key in ('signal', 'tx bitrate', 'inactive time'):
+                station[key.replace(' ', '_')] = value.strip()
+        info['stations'] = stations
+
+    for line in run(['ip', '-4', '-o', 'addr', 'show', 'dev', IFACE]).splitlines():
+        fields = line.split()
+        if 'inet' in fields:
+            info['ip'] = fields[fields.index('inet') + 1].split('/')[0]
+            break
+    return info
+
+
+def warnings(log):
+    """Counts of the recoveries done by the alabs-mod-wifi driver patches."""
+    patterns = (
+        ('usb write retries', 'rtl8xxxu_writeN_block: write at addr'),
+        ('firmware load retries', 'firmware load failed, retrying'),
+        ('beacons resent', 'beacon sent at attempt'),
+        ('beacons lost', 'Failed to read beacon valid bit'),
+    )
+    return dict((name, log.count(text)) for name, text in patterns)
+
+
+def info():
+    netdev = os.path.join('/sys/class/net', IFACE)
+    result = {'alabs_mod_wifi_version': read_file(VERSION_FILE, 'unknown'), 'present': os.path.exists(netdev)}
+    if not result['present']:
+        return result
+
+    log = kernel_log()
+    result['interface'] = IFACE
+    result['mac'] = read_file(os.path.join(netdev, 'address'))
+    result['usb'] = usb_info(netdev)
+    result.update(chip_info(log, result['usb'].get('port', '')))
+    result['driver'] = driver_info(netdev)
+    result.update(phy_info(netdev))
+    result['ap_supported'] = 'AP' in result['modes']
+    result['current'] = current_info()
+    result['recoveries'] = warnings(log)
+    return result
+
+
+def info_text(data):
+    lines = ['alabs-mod-wifi:  %s' % data['alabs_mod_wifi_version']]
+    if not data['present']:
+        lines.append('adapter:         none (no %s)' % IFACE)
+        return '\n'.join(lines)
+
+    usb = data.get('usb', {})
+    drv = data.get('driver', {})
+    cur = data.get('current', {})
+    lines.append('device:          %s %s (%s, USB port %s, %s Mbit/s)' % (
+        usb.get('manufacturer', ''), usb.get('product', ''), usb.get('id', '?'), usb.get('port', '?'), usb.get('speed', '?')))
+    lines.append('chip:            %s %s, firmware %s' % (data.get('chip', 'unknown'), data.get('paths', ''), data.get('firmware', 'unknown')))
+    lines.append('driver:          %s, %s (build %s)' % (
+        drv.get('name', '?'), 'alabs-mod-wifi' if drv.get('alabs_mod_wifi') else 'kernel', drv.get('build') or '?'))
+    lines.append('module:          %s' % drv.get('module', '?'))
+    lines.append('mac:             %s' % data.get('mac', '?'))
+    lines.append('modes:           %s' % ', '.join(data.get('modes', [])))
+    max_clients = data.get('max_ap_clients')
+    lines.append('access point:    %s' % (
+        ('yes, max %s clients' % max_clients if max_clients else 'yes') if data.get('ap_supported') else 'not supported'))
+    lines.append('channels:        %s' % ' '.join(str(c) for c in data.get('channels', [])))
+    lines.append('AP channels:     %s' % ' '.join(str(c) for c in data.get('ap_channels', [])))
+    lines.append('mode:            %s' % cur.get('mode', '?'))
+    for key in ('ssid', 'channel', 'ip', 'signal', 'tx_bitrate', 'rx_bitrate'):
+        if key in cur:
+            lines.append('%-16s %s' % (key.replace('_', ' ') + ':', cur[key]))
+    for st in cur.get('stations', []):
+        lines.append('client:          %s, signal %s, tx %s, inactive %s' % (
+            st.get('mac'), st.get('signal', '?'), st.get('tx_bitrate', '?'), st.get('inactive_time', '?')))
+    lines.append('recoveries:      %s' % ', '.join('%s %d' % (k, v) for k, v in sorted(data.get('recoveries', {}).items())))
+    return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
+# wifi-ap state
+
+
+def wifi_ap_command():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'wifi-ap')
+    return path if os.path.exists(path) else 'wifi-ap'
+
+
+def status():
+    """"wifi-ap status" as a dict."""
+    # "error <reason>" comes with exit code 1
+    line = run([wifi_ap_command(), 'status'], keep_failed=True).strip()
+    words = line.split(' ')
+    state = {'state': words[0] if words[0] else 'unknown'}
+    if state['state'] == 'on':
+        state['ip'] = words[1] if len(words) > 1 else None
+        state['ssid'] = ' '.join(words[2:]) or None
+        state['ap_supported'] = True
+    elif state['state'] == 'off':
+        state['ip'] = words[1] if len(words) > 1 and words[1] != 'none' else None
+        state['ap_supported'] = len(words) > 2 and words[2] == 'ap'
+        state['error'] = words[3] if len(words) > 3 else None
+    elif state['state'] == 'error':
+        state['error'] = words[1] if len(words) > 1 else 'unknown'
+    return state
+
+
+def wpa_cli(args):
+    return run(['wpa_cli', '-p', WPA_CTRL_DIR, '-i', IFACE] + args)
+
+
+def client_running():
+    return wpa_cli(['ping']).strip() == 'PONG'
+
+
+def wpa_scan_wait(timeout=10):
+    """Starts a scan and waits for its end (CTRL-EVENT-SCAN-RESULTS) on the
+    control socket: a scan takes 3-6 s, more while connected.
+    Returns 'done', 'timeout' or 'unavailable' (socket not usable)."""
+    local = '/tmp/wifi-ap-helper-%d' % os.getpid()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    started = False
+    try:
+        if os.path.exists(local):
+            os.unlink(local)
+        sock.bind(local)
+        sock.connect(os.path.join(WPA_CTRL_DIR, IFACE))
+        sock.settimeout(2)
+        sock.send(b'ATTACH')
+        if sock.recv(4096).strip() != b'OK':
+            return 'unavailable'
+        # FAIL-BUSY: a scan is already running, its results are fine too
+        sock.send(b'SCAN')
+        started = True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            sock.settimeout(max(0.1, deadline - time.time()))
+            if b'CTRL-EVENT-SCAN-RESULTS' in sock.recv(4096):
+                return 'done'
+        return 'timeout'
+    except OSError:  # socket.timeout included
+        return 'timeout' if started else 'unavailable'
+    finally:
+        sock.close()
+        try:
+            os.unlink(local)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# client networks: /data/wpa_supplicant.conf
+
+
+def ssid_from_conf(value):
+    """bytes of an ssid= value ("text" or hex), None if not understood."""
+    value = value.strip()
+    if value.startswith('"') and value.rfind('"') > 0:
+        return value[1:value.rfind('"')].encode('utf-8')
+    if re.match(r'^([0-9a-fA-F]{2})+$', value):
+        return binascii.unhexlify(value)
+    return None
+
+
+def ssid_to_conf(ssid):
+    """ssid= value: quoted when plain text, hex otherwise."""
+    try:
+        text = ssid.decode('ascii')
+        if re.match(r'^[\x20-\x7e]+$', text) and '"' not in text and '\\' not in text:
+            return '"%s"' % text
+    except UnicodeDecodeError:
+        pass
+    return binascii.hexlify(ssid).decode('ascii')
+
+
+def ssid_name(ssid):
+    return ssid.decode('utf-8', 'replace')
+
+
+def parse_wpa_conf(text):
+    """(global lines, networks); a network is {'ssid', 'priority', 'open', 'lines'}.
+
+    Blocks without an ssid that we understand have ssid None and are kept
+    untouched."""
+    globals_, networks = [], []
+    block = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if block is None:
+            if re.match(r'^network\s*=\s*\{', stripped):
+                block = []
+            else:
+                globals_.append(line)
+            continue
+        if stripped == '}':
+            fields = {}
+            for field in block:
+                key, sep, value = field.strip().partition('=')
+                if sep:
+                    fields[key.strip()] = value
+            try:
+                priority = int(fields.get('priority', '0'))
+            except ValueError:
+                priority = 0
+            networks.append({
+                'ssid': ssid_from_conf(fields['ssid']) if 'ssid' in fields else None,
+                'priority': priority,
+                'open': 'psk' not in fields and fields.get('key_mgmt', '').strip() == 'NONE',
+                'lines': block,
+            })
+            block = None
+            continue
+        block.append(line)
+    return globals_, networks
+
+
+def read_networks():
+    text = read_file(WPA_CONF, None)
+    if text is None:
+        return list(WPA_CONF_HEADER), [], False
+    globals_, networks = parse_wpa_conf(text)
+    return globals_, networks, True
+
+
+def ordered(networks):
+    """Managed networks (with an ssid) by priority, highest first; stable."""
+    managed = [n for n in networks if n['ssid'] is not None]
+    return sorted(managed, key=lambda n: -n['priority'])
+
+
+def scan_results():
+    """Networks seen by the last scan of wpa_supplicant: {ssid bytes: info}."""
+    seen = {}
+    out = wpa_cli(['scan_results'])
+    for line in out.splitlines()[1:]:
+        fields = line.split('\t')
+        if len(fields) < 5 or not fields[4]:
+            continue
+        ssid = decode_wpa_cli_ssid(fields[4])
+        try:
+            signal = int(fields[2])
+        except ValueError:
+            signal = None
+        info = {'signal': signal, 'secured': any(k in fields[3] for k in ('WPA', 'WEP', 'RSN')),
+                'channel': freq_to_channel(fields[1])}
+        if ssid not in seen or (signal or -999) > (seen[ssid]['signal'] or -999):
+            seen[ssid] = info
+    return seen
+
+
+def scan_iw():
+    """Visible networks with "iw dev wlan0 scan", when wpa_supplicant is not running."""
+    run(['ip', 'link', 'set', IFACE, 'up'])
+
+    found = []
+    for line in run(['iw', 'dev', IFACE, 'scan']).splitlines():
+        if line.startswith('BSS '):
+            found.append({'signal': None, 'secured': False, 'channel': None, 'ssid': None})
+            continue
+        if not found:
+            continue
+        bss = found[-1]
+        key, sep, value = line.strip().partition(':')
+        value = value.strip()
+        if key == 'freq':
+            bss['channel'] = freq_to_channel(value.split('.')[0])
+        elif key == 'signal':
+            try:
+                bss['signal'] = int(float(value.split()[0]))
+            except (ValueError, IndexError):
+                pass
+        elif key == 'SSID' and value:
+            bss['ssid'] = decode_wpa_cli_ssid(value)
+        elif key in ('RSN', 'WPA') or (key == 'capability' and 'Privacy' in value):
+            bss['secured'] = True
+
+    # one entry per network name, the strongest access point
+    seen = {}
+    for bss in found:
+        ssid = bss.pop('ssid')
+        if not ssid:
+            continue
+        if ssid not in seen or (bss['signal'] or -999) > (seen[ssid]['signal'] or -999):
+            seen[ssid] = bss
+    return seen
+
+
+def decode_wpa_cli_ssid(text):
+    """wpa_cli escapes the non printable ssid bytes (backslash x NN), backslash and quote."""
+    out = bytearray()
+    i = 0
+    raw = text.encode('utf-8', 'surrogateescape')
+    while i < len(raw):
+        c = raw[i:i + 1]
+        if c == b'\\' and raw[i + 1:i + 2] == b'x' and re.match(br'^[0-9a-fA-F]{2}$', raw[i + 2:i + 4]):
+            out += binascii.unhexlify(raw[i + 2:i + 4])
+            i += 4
+        elif c == b'\\' and raw[i + 1:i + 2] in (b'\\', b'"'):
+            out += raw[i + 1:i + 2]
+            i += 2
+        else:
+            out += c
+            i += 1
+    return bytes(out)
+
+
+def freq_to_channel(freq):
+    try:
+        freq = int(freq)
+    except ValueError:
+        return None
+    if freq == 2484:
+        return 14
+    if 2412 <= freq <= 2472:
+        return (freq - 2407) // 5
+    if 5000 <= freq <= 5900:
+        return (freq - 5000) // 5
+    return None
+
+
+def connected_ssid():
+    for line in wpa_cli(['status']).splitlines():
+        key, sep, value = line.partition('=')
+        if key == 'ssid' and value:
+            return decode_wpa_cli_ssid(value)
+    return None
+
+
+def networks_state(st):
+    globals_, networks, exists = read_networks()
+    client = st.get('state') == 'off' and client_running()
+    seen = scan_results() if client else {}
+    current = connected_ssid() if client else None
+
+    result = []
+    for n in ordered(networks):
+        result.append({
+            'ssid': ssid_name(n['ssid']),
+            'has_password': not n['open'],
+            'connected': current is not None and n['ssid'] == current,
+            'in_range': (n['ssid'] in seen) if client else None,
+        })
+    return {
+        'networks': result,
+        'unmanaged': len([n for n in networks if n['ssid'] is None]),
+        'client_running': client,
+        'config_exists': exists,
+    }
+
+
+def psk_hex(passphrase, ssid):
+    """The PSK wpa_passphrase computes: the passphrase itself is not stored."""
+    key = hashlib.pbkdf2_hmac('sha1', passphrase.encode('ascii'), ssid, 4096, 32)
+    return binascii.hexlify(key).decode('ascii')
+
+
+def valid_ssid(name):
+    ssid = name.encode('utf-8')
+    if not 1 <= len(ssid) <= 32 or re.search(r'[\x00-\x1f\x7f]', name):
+        return None
+    return ssid
+
+
+def valid_passphrase(password):
+    # WPA passphrase: 8..63 printable ASCII characters
+    return 8 <= len(password) <= 63 and re.match(r'^[\x20-\x7e]+$', password) is not None
+
+
+def networks_set(data):
+    """data: [{"ssid": name, "password": null (keep) | "" (open) | text}], highest priority first."""
+    if not isinstance(data, list):
+        return {'ok': False, 'error': 'invalid-request'}
+
+    globals_, networks, exists = read_networks()
+    by_ssid = dict((n['ssid'], n) for n in networks if n['ssid'] is not None)
+
+    blocks, names = [], set()
+    for i, entry in enumerate(data):
+        if not isinstance(entry, dict) or not isinstance(entry.get('ssid'), str):
+            return {'ok': False, 'error': 'invalid-request'}
+        ssid = valid_ssid(entry['ssid'])
+        if ssid is None:
+            return {'ok': False, 'error': 'invalid-ssid', 'ssid': entry['ssid']}
+        if ssid in names:
+            return {'ok': False, 'error': 'duplicated-ssid', 'ssid': entry['ssid']}
+        names.add(ssid)
+
+        priority = len(data) - i
+        password = entry.get('password')
+        if password is None:
+            # keep the stored key and any other field, update the priority
+            old = by_ssid.get(ssid)
+            if old is None:
+                return {'ok': False, 'error': 'missing-password', 'ssid': entry['ssid']}
+            lines = [l for l in old['lines'] if l.strip().partition('=')[0].strip() != 'priority']
+            lines.append('\tpriority=%d' % priority)
+            blocks.append(lines)
+            continue
+
+        if not isinstance(password, str):
+            return {'ok': False, 'error': 'invalid-request'}
+        lines = ['\tssid=%s' % ssid_to_conf(ssid)]
+        if password == '':
+            lines.append('\tkey_mgmt=NONE')
+        elif re.match(r'^[0-9a-fA-F]{64}$', password):
+            lines.append('\tpsk=%s' % password.lower())
+        elif valid_passphrase(password):
+            lines.append('\tpsk=%s' % psk_hex(password, ssid))
+        else:
+            return {'ok': False, 'error': 'invalid-password', 'ssid': entry['ssid']}
+        lines.append('\tpriority=%d' % priority)
+        blocks.append(lines)
+
+    # blocks this UI doesn't manage are kept untouched, at the end
+    blocks += [n['lines'] for n in networks if n['ssid'] is None]
+
+    text = '\n'.join(globals_).rstrip('\n') + '\n'
+    for lines in blocks:
+        text += '\nnetwork={\n%s\n}\n' % '\n'.join(lines)
+    write_file(WPA_CONF, text)
+
+    return {'ok': True, 'applied': apply_networks()}
+
+
+def write_file(path, text):
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, path)
+
+
+def apply_networks():
+    """Make wpa_supplicant use the new networks; with the AP on, at the next switch."""
+    st = status()
+    if st.get('state') != 'off':
+        return 'deferred'
+    if client_running():
+        wpa_cli(['reconfigure'])
+        return 'reconfigured'
+    if os.path.exists(os.path.join('/sys/class/net', IFACE)):
+        # the units start only when /data/wpa_supplicant.conf exists
+        run(['systemctl', 'start'] + CLIENT_UNITS)
+        return 'started'
+    return 'deferred'
+
+
+def scan():
+    st = status()
+    if st.get('state') != 'off':
+        return {'ok': False, 'error': 'ap-active' if st.get('state') in ('on', 'starting', 'stopping') else st.get('error', 'unknown')}
+    if client_running():
+        if wpa_scan_wait() == 'unavailable':
+            wpa_cli(['scan'])
+            time.sleep(6)
+        seen = scan_results()
+    else:
+        # no client network configured yet: scan without wpa_supplicant
+        seen = scan_iw()
+    networks = [dict(info, ssid=ssid_name(ssid)) for ssid, info in seen.items()]
+    networks.sort(key=lambda n: -(n['signal'] if n['signal'] is not None else -999))
+    return {'ok': True, 'networks': networks}
+
+
+# ---------------------------------------------------------------------------
+# access point: /data/wifi-ap.conf (sourced by wifi-ap)
+
+
+def shell_unquote(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        inner = value[1:-1]
+        return inner.replace("'\\''", "'") if value[0] == "'" else inner
+    return value
+
+
+def read_ap_conf():
+    conf = dict(AP_DEFAULTS)
+    lines = read_file(AP_CONF).splitlines()
+    for line in lines:
+        key, sep, value = line.partition('=')
+        key = key.strip()
+        if key == 'AP_SSID':
+            conf['ssid'] = shell_unquote(value)
+        elif key == 'AP_PSK':
+            conf['password'] = shell_unquote(value)
+        elif key == 'AP_CHANNEL':
+            try:
+                conf['channel'] = int(shell_unquote(value))
+            except ValueError:
+                pass
+    return conf, lines
+
+
+def ap_state(st, phy):
+    conf, lines = read_ap_conf()
+    return {
+        'ssid': conf['ssid'],
+        'password': conf['password'],
+        'channel': conf['channel'],
+        'channels': phy.get('ap_channels') or list(range(1, 12)),
+        'supported': phy.get('ap_supported', False),
+        'running': st.get('state') in ('on', 'starting'),
+    }
+
+
+def shell_quote(value):
+    return "'%s'" % value.replace("'", "'\\''")
+
+
+def ap_set(data):
+    if not isinstance(data, dict):
+        return {'ok': False, 'error': 'invalid-request'}
+    ssid, password, channel = data.get('ssid'), data.get('password'), data.get('channel')
+
+    # wifi-ap writes them in a wpa_supplicant config between double quotes
+    if not isinstance(ssid, str) or valid_ssid(ssid) is None or '"' in ssid or '\\' in ssid:
+        return {'ok': False, 'error': 'invalid-ssid'}
+    if not isinstance(password, str) or not valid_passphrase(password) or '"' in password or '\\' in password:
+        return {'ok': False, 'error': 'invalid-password'}
+
+    netdev = os.path.join('/sys/class/net', IFACE)
+    channels = phy_info(netdev).get('ap_channels') or list(range(1, 12))
+    try:
+        channel = int(channel)
+    except (TypeError, ValueError):
+        return {'ok': False, 'error': 'invalid-channel'}
+    if channel not in channels:
+        return {'ok': False, 'error': 'invalid-channel'}
+
+    # keep the other settings of the file (e.g. WIFI_AP_DEBUG)
+    conf, lines = read_ap_conf()
+    lines = [l for l in lines if l.partition('=')[0].strip() not in ('AP_SSID', 'AP_PSK', 'AP_CHANNEL')]
+    lines += ['AP_SSID=%s' % shell_quote(ssid), 'AP_PSK=%s' % shell_quote(password), 'AP_CHANNEL=%d' % channel]
+    write_file(AP_CONF, '\n'.join(lines) + '\n')
+
+    return {'ok': True, 'applied': 'next-start' if status().get('state') in ('on', 'starting') else 'saved'}
+
+
+def state():
+    st = status()
+    data = info()
+    netdev = os.path.join('/sys/class/net', IFACE)
+    phy = phy_info(netdev) if data['present'] else {}
+    phy['ap_supported'] = data.get('ap_supported', False)
+    result = {'status': st, 'info': data, 'ap': ap_state(st, phy)}
+    result.update(networks_state(st))
+    return result
+
+
+def names():
+    """Network names that may show up in logs: for the diagnostics redaction."""
+    found = []
+    globals_, networks, exists = read_networks()
+    found += [ssid_name(n['ssid']) for n in networks if n['ssid'] is not None]
+    found.append(read_ap_conf()[0]['ssid'])
+    return [n for n in found if n]
+
+
+def read_json_stdin():
+    try:
+        return json.loads(sys.stdin.read())
+    except ValueError:
+        return None
+
+
+
+def main(argv):
+    command = argv[0] if argv else ''
+    if command == 'info':
+        data = info()
+        if '--text' in argv[1:]:
+            print(info_text(data))
+        else:
+            print(json.dumps(data, sort_keys=True))
+        return 0
+    if command == 'state':
+        print(json.dumps(state(), sort_keys=True))
+        return 0
+    if command == 'networks-set':
+        print(json.dumps(networks_set(read_json_stdin())))
+        return 0
+    if command == 'scan':
+        print(json.dumps(scan()))
+        return 0
+    if command == 'ap-set':
+        print(json.dumps(ap_set(read_json_stdin())))
+        return 0
+    if command == 'names':
+        for name in names():
+            print(name)
+        return 0
+
+    sys.stderr.write('usage: wifi-ap-helper info [--text] | state | networks-set | scan | ap-set | names\n')
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

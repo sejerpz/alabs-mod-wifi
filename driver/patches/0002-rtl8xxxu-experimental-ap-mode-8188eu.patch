@@ -1,0 +1,182 @@
+Subject: [PATCH] rtl8xxxu: EXPERIMENTAL AP mode for RTL8188EU (single station)
+
+The 8188e does rate adaptation in software with one global ra_info, so
+upstream never enabled AP mode on it. This patch enables it limited to a
+single associated station:
+
+- rtl8188eu_fops: supports_ap = 1, max_macid_num = 2 (macid 0 bc/mc,
+  macid 1 the station); sta_add enforces max_macid_num.
+- tx report2: always use item 0 (fill_txdesc_v3 never sets the macid).
+- fill_txdesc_v3: multicast data frames at 1M instead of the RA rate.
+- track the station rx signal (moving average) and, in the watchdog,
+  feed it to the software RA and refresh the rate mask, like the
+  station mode does.
+- sta_add: start from the lowest rssi level (full rate mask) instead of
+  signal 0, which would lock the mask to MCS4-7.
+
+Applies on top of 0001-rtl8xxxu-build-on-6.1-and-retry-usb-writes.patch.
+---
+diff -u a/rtl8xxxu_8188e.c b/rtl8xxxu_8188e.c
+--- a/rtl8xxxu_8188e.c
++++ b/rtl8xxxu_8188e.c
+@@ -1697,10 +1697,11 @@
+ 	dev_dbg(dev, "%s: len: %d items: %d\n", __func__, tx_rpt_len, items);
+ 
+ 	/* We only use macid 0, so only the first item is relevant.
+-	 * AP mode will use more of them if it's ever implemented.
++	 * The 8188e tx descriptor (fill_txdesc_v3) never sets the macid, so
++	 * in AP mode too all the reports land in item 0, and there is only
++	 * one global ra_info to update anyway.
+ 	 */
+-	if (!priv->vif || priv->vif->type == NL80211_IFTYPE_STATION)
+-		items = 1;
++	items = 1;
+ 
+ 	for (macid = 0; macid < items; macid++) {
+ 		valid = false;
+@@ -1880,6 +1881,13 @@
+ 	.rx_desc_size = sizeof(struct rtl8xxxu_rxdesc16),
+ 	.tx_desc_size = sizeof(struct rtl8xxxu_txdesc32),
+ 	.has_tx_report = 1,
++	/*
++	 * EXPERIMENTAL: the 8188e rate adaptation is done in software with a
++	 * single global ra_info, so AP mode is limited to one station
++	 * (macid 0 is the broadcast/multicast macid, macid 1 the station).
++	 */
++	.supports_ap = 1,
++	.max_macid_num = 2,
+ 	.init_reg_pkt_life_time = 1,
+ 	.gen2_thermal_meter = 1,
+ 	.adda_1t_init = 0x0b1b25a0,
+diff -u a/rtl8xxxu_core.c b/rtl8xxxu_core.c
+--- a/rtl8xxxu_core.c
++++ b/rtl8xxxu_core.c
+@@ -5449,7 +5449,11 @@
+ 	seq_number = IEEE80211_SEQ_TO_SN(le16_to_cpu(hdr->seq_ctrl));
+ 
+ 	if (ieee80211_is_data(hdr->frame_control)) {
+-		rate = ra->decision_rate;
++		/* AP mode: multicast is not acked, send it at the lowest rate */
++		if (is_multicast_ether_addr(ieee80211_get_DA(hdr)))
++			rate = DESC_RATE_1M;
++		else
++			rate = ra->decision_rate;
+ 		tx_desc->txdw5 = cpu_to_le32(rate);
+ 		tx_desc->txdw4 |= cpu_to_le32(TXDESC32_USE_DRIVER_RATE);
+ 		tx_desc->txdw4 |= le32_encode_bits(ra->pt_stage, TXDESC32_PT_STAGE_MASK);
+@@ -6262,6 +6266,22 @@
+ 	}
+ }
+ 
++static void rtl8188e_ap_track_signal(struct rtl8xxxu_priv *priv,
++				     struct ieee80211_rx_status *rx_status,
++				     struct ieee80211_hdr *hdr)
++{
++	if (is_zero_ether_addr(priv->ap_sta_addr) ||
++	    !ether_addr_equal(hdr->addr2, priv->ap_sta_addr))
++		return;
++
++	/* simple moving average, 1/8 weight to the new sample */
++	if (!priv->ap_sta_signal)
++		priv->ap_sta_signal = rx_status->signal;
++	else
++		priv->ap_sta_signal = (priv->ap_sta_signal * 7 +
++				       rx_status->signal) / 8;
++}
++
+ int rtl8xxxu_parse_rxdesc16(struct rtl8xxxu_priv *priv, struct sk_buff *skb)
+ {
+ 	struct ieee80211_hw *hw = priv->hw;
+@@ -6334,6 +6354,12 @@
+ 					(struct ieee80211_hdr *)skb->data,
+ 					rx_desc->crc32 || rx_desc->icverr);
+ 
++			if (priv->rtl_chip == RTL8188E && rx_desc->phy_stats &&
++			    !rx_desc->crc32 && priv->vif &&
++			    priv->vif->type == NL80211_IFTYPE_AP)
++				rtl8188e_ap_track_signal(priv, rx_status,
++					(struct ieee80211_hdr *)skb->data);
++
+ 			rx_status->mactime = rx_desc->tsfl;
+ 			rx_status->flag |= RX_FLAG_MACTIME_START;
+ 
+@@ -7193,6 +7219,22 @@
+ 			rtl8xxxu_track_cfo(priv);
+ 
+ 		rtl8xxxu_refresh_rate_mask(priv, signal, sta, false);
++	} else if (vif && vif->type == NL80211_IFTYPE_AP &&
++		   priv->rtl_chip == RTL8188E && priv->ap_sta_signal) {
++		/*
++		 * 8188e software rate adaptation in AP mode (single station):
++		 * feed it the signal tracked on rx, like the station case.
++		 */
++		int signal = priv->ap_sta_signal;
++		struct ieee80211_sta *sta;
++
++		priv->fops->report_rssi(priv, 0, rtl8xxxu_signal_to_snr(signal));
++
++		rcu_read_lock();
++		sta = ieee80211_find_sta(vif, priv->ap_sta_addr);
++		if (sta)
++			rtl8xxxu_refresh_rate_mask(priv, signal, sta, false);
++		rcu_read_unlock();
+ 	}
+ 
+ out:
+@@ -7335,7 +7377,24 @@
+ 		if (sta_info->macid >= RTL8XXXU_MAX_MAC_ID_NUM)
+ 			return -ENOSPC;
+ 
+-		rtl8xxxu_refresh_rate_mask(priv, 0, sta, true);
++		if (priv->fops->max_macid_num &&
++		    sta_info->macid >= priv->fops->max_macid_num) {
++			rtl8xxxu_release_macid(priv, sta_info->macid);
++			return -ENOSPC;
++		}
++
++		if (priv->rtl_chip == RTL8188E) {
++			/*
++			 * No rx signal yet: start from the lowest rssi level
++			 * (full rate mask) and let the watchdog raise it.
++			 */
++			ether_addr_copy(priv->ap_sta_addr, sta->addr);
++			priv->ap_sta_signal = 0;
++			rtl8xxxu_refresh_rate_mask(priv, RTL8XXXU_NOISE_FLOOR_MIN,
++						   sta, true);
++		} else {
++			rtl8xxxu_refresh_rate_mask(priv, 0, sta, true);
++		}
+ 		priv->fops->report_connect(priv, sta_info->macid, H2C_MACID_ROLE_STA, true);
+ 	}
+ 
+@@ -7349,9 +7408,15 @@
+ 	struct rtl8xxxu_sta_info *sta_info = (struct rtl8xxxu_sta_info *)sta->drv_priv;
+ 	struct rtl8xxxu_priv *priv = hw->priv;
+ 
+-	if (vif->type == NL80211_IFTYPE_AP)
++	if (vif->type == NL80211_IFTYPE_AP) {
+ 		rtl8xxxu_release_macid(priv, sta_info->macid);
+ 
++		if (ether_addr_equal(priv->ap_sta_addr, sta->addr)) {
++			eth_zero_addr(priv->ap_sta_addr);
++			priv->ap_sta_signal = 0;
++		}
++	}
++
+ 	return 0;
+ }
+ 
+diff -u a/rtl8xxxu.h b/rtl8xxxu.h
+--- a/rtl8xxxu.h
++++ b/rtl8xxxu.h
+@@ -1906,6 +1906,10 @@
+ 	struct rtl8xxxu_cfo_tracking cfo_tracking;
+ 	struct rtl8xxxu_ra_info ra_info;
+ 
++	/* 8188e AP mode: the single associated station and its rx signal */
++	u8 ap_sta_addr[ETH_ALEN];
++	int ap_sta_signal;
++
+ 	bool led_registered;
+ 	char led_name[32];
+ 	struct led_classdev led_cdev;

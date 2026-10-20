@@ -1,0 +1,403 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# wifi-ap - switch wlan0 between WiFi client mode and access point mode
+#
+#   wifi-ap on [-b]    start the access point
+#   wifi-ap off [-b]   stop the access point and go back to client mode
+#   wifi-ap status     print the current state
+#   wifi-ap info       WiFi adapter information, as JSON ("info --text": text)
+#   wifi-ap state | networks-set | scan | ap-set | names
+#                      data commands of the web UI (as root), see wifi-ap-helper
+#
+# Every command prints exactly ONE line on stdout, so it can be used from the
+# HMI through the serial console (cli_command reads only the first line):
+#
+#   on <ip> <ssid>                     access point running
+#   off <ip|none> <ap|noap> [<error>]  client mode, with the wlan0 IPv4
+#                                      address if connected, whether the
+#                                      adapter supports AP mode and the
+#                                      error of the last on/off, if any
+#   starting / stopping                on/off in progress
+#   error <reason>                     the command failed (exit code 1)
+#
+# With -b, on/off run in background and print "starting"/"stopping" right
+# away: the HMI waits only a few hundred ms for an answer, starting the
+# access point takes a few seconds. Poll "status" for the result.
+#
+# The HMI shell runs as the unprivileged "hmi" user: when not run as root,
+# on/off only write the request to /run/wifi-ap/request, and wifi-ap.path
+# runs "wifi-ap request" as root (see the systemd/ directory). "status" works
+# as any user.
+#
+# Client mode is the stock image setup: wpa-supplicant-wlan0 + dhcpcd-wlan0,
+# both started by the wlan0 device and configured by /data/wpa_supplicant.conf.
+# In AP mode those units are masked (runtime only), wpa_supplicant runs in
+# AP mode (mode=2) and dnsmasq is restarted with a config that also serves
+# DHCP on wlan0. Nothing is persistent: after a reboot wlan0 is in client mode.
+#
+# With WIFI_AP_DEBUG=1 in the environment, "on" runs wpa_supplicant with
+# debug output (-dd -t) logged to /run/wifi-ap/wpa_supplicant.log.
+#
+# Optional settings in /data/wifi-ap.conf (shell syntax):
+#   AP_SSID="moddwarf"
+#   AP_PSK="moddwarf"        # WPA2 passphrase, 8..63 characters
+#   AP_CHANNEL=6             # 2.4 GHz channel 1..11
+
+IFACE=wlan0
+AP_IP=192.168.60.1
+AP_PREFIX=24
+DHCP_RANGE=192.168.60.50,192.168.60.150,12h
+
+AP_SSID="moddwarf"
+AP_PSK="moddwarf"
+AP_CHANNEL=6
+
+CONF_FILE=/data/wifi-ap.conf
+RUN_DIR=/run/wifi-ap
+WPA_CONF=$RUN_DIR/wpa_ap.conf
+WPA_PID=$RUN_DIR/wpa_supplicant.pid
+WPA_CTRL=$RUN_DIR/ctrl
+WPA_LOG=$RUN_DIR/wpa_supplicant.log
+DNSMASQ_CONF=$RUN_DIR/dnsmasq.conf
+DNSMASQ_DROPIN_DIR=/run/systemd/system/dnsmasq.service.d
+DNSMASQ_DROPIN=$DNSMASQ_DROPIN_DIR/wifi-ap.conf
+STATE_FILE=$RUN_DIR/state
+ERROR_FILE=$RUN_DIR/last_error
+REQUEST_FILE=$RUN_DIR/request
+LOCK_FILE=/run/wifi-ap.lock
+
+CLIENT_UNITS="wpa-supplicant-wlan0.service dhcpcd-wlan0.service"
+
+log()
+{
+    logger -t wifi-ap -- "$*"
+}
+
+# print the single result line and exit; on/off also record the outcome
+# for "status" (RECORD_RESULT=1)
+result()
+{
+    echo "$*"
+    if [ "$1" = "error" ]; then
+        [ -n "$RECORD_RESULT" ] && echo "$2" > $ERROR_FILE
+        exit 1
+    fi
+    [ -n "$RECORD_RESULT" ] && rm -f $ERROR_FILE
+    exit 0
+}
+
+iface_ip()
+{
+    ip -4 -o addr show dev $IFACE 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'
+}
+
+# true if the process is alive; /proc instead of "kill -0", which fails for
+# root processes when run as the hmi user
+pid_alive()
+{
+    [ -n "$1" ] && [ -d /proc/$1 ]
+}
+
+ap_running()
+{
+    [ -f $WPA_PID ] && pid_alive "$(cat $WPA_PID 2>/dev/null)"
+}
+
+ap_supported()
+{
+    iw list 2>/dev/null | grep -q '^[[:space:]]*\* AP$'
+}
+
+print_status()
+{
+    local cmd pid age request_error=
+
+    # request from the hmi user not yet picked up by wifi-ap.path: if it
+    # waits for too long wifi-ap.path is not running, report it instead of
+    # being "starting" forever
+    cmd=$(cat $REQUEST_FILE 2>/dev/null)
+    case "$cmd" in
+        on|off)
+            age=$(( $(date +%s) - $(stat -c %Y $REQUEST_FILE) ))
+            if [ $age -lt 10 ]; then
+                [ "$cmd" = "on" ] && result starting
+                result stopping
+            fi
+            request_error=request-not-processed
+            ;;
+    esac
+
+    # on/off in progress
+    if [ -f $STATE_FILE ]; then
+        read -r cmd pid < $STATE_FILE
+        if pid_alive "$pid"; then
+            [ "$cmd" = "on" ] && result starting
+            result stopping
+        fi
+    fi
+
+    if ! ip link show $IFACE >/dev/null 2>&1; then
+        result error no-wifi-device
+    fi
+
+    local ssid ip support error
+    if ap_running; then
+        # the network in use, also when the configuration can't be read or
+        # changed after the start
+        ssid=$(iw dev $IFACE info 2>/dev/null | sed -n 's/^[[:space:]]*ssid //p')
+        result on $AP_IP "${ssid:-$AP_SSID}"
+    fi
+
+    ip=$(iface_ip)
+    support=noap
+    ap_supported && support=ap
+    error=$(cat $ERROR_FILE 2>/dev/null)
+    result off ${ip:-none} $support ${request_error:-$error}
+}
+
+write_wpa_conf()
+{
+    local freq=$((2407 + AP_CHANNEL * 5))
+
+    cat > $WPA_CONF <<EOF
+ctrl_interface=$WPA_CTRL
+network={
+    ssid="$AP_SSID"
+    mode=2
+    frequency=$freq
+    key_mgmt=WPA-PSK
+    proto=RSN
+    pairwise=CCMP
+    group=CCMP
+    psk="$AP_PSK"
+}
+EOF
+    chmod 600 $WPA_CONF
+}
+
+# dnsmasq: same config as the image, plus DHCP on wlan0.
+# There can be only one dnsmasq (it listens on all interfaces without
+# bind-interfaces), so the running instance is restarted with this config
+# through a runtime drop-in.
+dnsmasq_ap_start()
+{
+    sed 's/^no-dhcp-interface=.*/no-dhcp-interface=lo/' /etc/dnsmasq.conf > $DNSMASQ_CONF
+    printf 'interface=%s\ndhcp-range=%s,%s\n' $IFACE $IFACE $DHCP_RANGE >> $DNSMASQ_CONF
+
+    mkdir -p $DNSMASQ_DROPIN_DIR
+    cat > $DNSMASQ_DROPIN <<EOF
+[Service]
+ExecStartPre=
+ExecStartPre=/usr/sbin/dnsmasq --test -C $DNSMASQ_CONF
+ExecStart=
+ExecStart=/usr/sbin/dnsmasq -k --pid-file -C $DNSMASQ_CONF
+EOF
+    systemctl daemon-reload
+    systemctl restart dnsmasq.service
+}
+
+dnsmasq_ap_stop()
+{
+    if [ -f $DNSMASQ_DROPIN ]; then
+        rm -f $DNSMASQ_DROPIN
+        systemctl daemon-reload
+        systemctl restart dnsmasq.service
+    fi
+    rm -f $DNSMASQ_CONF
+}
+
+ap_on()
+{
+    if ! ip link show $IFACE >/dev/null 2>&1; then
+        result error no-wifi-device
+    fi
+
+    if ap_running; then
+        result on $AP_IP $AP_SSID
+    fi
+
+    if ! ap_supported; then
+        result error ap-not-supported
+    fi
+
+    if [ ${#AP_PSK} -lt 8 ] || [ ${#AP_PSK} -gt 63 ] || [[ "$AP_PSK$AP_SSID" == *'"'* ]]; then
+        result error invalid-psk
+    fi
+
+    if ! [[ "$AP_CHANNEL" =~ ^([1-9]|1[01])$ ]]; then
+        result error invalid-channel
+    fi
+
+    log "starting access point ssid=$AP_SSID channel=$AP_CHANNEL"
+
+    # stop client mode; mask so a wlan0 hotplug does not start it again
+    systemctl mask --runtime $CLIENT_UNITS >/dev/null 2>&1
+    systemctl stop $CLIENT_UNITS >/dev/null 2>&1
+
+    ip addr flush dev $IFACE
+    ip addr add $AP_IP/$AP_PREFIX dev $IFACE
+
+    write_wpa_conf
+    rm -rf $WPA_CTRL
+    if [ -n "$WIFI_AP_DEBUG" ]; then
+        # stay in foreground to capture the debug output
+        wpa_supplicant -dd -t -i $IFACE -D nl80211 -c $WPA_CONF > $WPA_LOG 2>&1 < /dev/null 9>&- &
+        echo $! > $WPA_PID
+        log "debug log in $WPA_LOG"
+    elif ! wpa_supplicant -B -P $WPA_PID -i $IFACE -D nl80211 -c $WPA_CONF >/dev/null 2>&1 9>&-; then
+        log "wpa_supplicant failed to start"
+        ap_off_internal
+        result error wpa_supplicant-failed
+    fi
+
+    # wait for the AP to be up (wpa_state=COMPLETED), the initial scan
+    # takes ~1s
+    local i state
+    for ((i = 0; i < 10; i++)); do
+        sleep 1
+        state=$(wpa_cli -p $WPA_CTRL -i $IFACE status 2>/dev/null | sed -n 's/^wpa_state=//p')
+        [ "$state" = "COMPLETED" ] && break
+    done
+
+    if [ "$state" != "COMPLETED" ]; then
+        log "access point did not start (wpa_state=$state)"
+        ap_off_internal
+        result error ap-start-timeout
+    fi
+
+    dnsmasq_ap_start
+
+    log "access point running on $AP_IP"
+    result on $AP_IP $AP_SSID
+}
+
+# back to client mode, without printing anything
+ap_off_internal()
+{
+    if [ -f $WPA_PID ]; then
+        local pid i
+        pid=$(cat $WPA_PID)
+        kill "$pid" 2>/dev/null
+        for ((i = 0; i < 3; i++)); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+        done
+        kill -9 "$pid" 2>/dev/null
+        rm -f $WPA_PID
+    fi
+    rm -rf $WPA_CTRL $WPA_CONF
+
+    dnsmasq_ap_stop
+
+    ip addr flush dev $IFACE 2>/dev/null
+
+    systemctl unmask --runtime $CLIENT_UNITS >/dev/null 2>&1
+    # the units have ConditionPathExists=/data/wpa_supplicant.conf,
+    # so this is a no-op when no client network is configured
+    systemctl start $CLIENT_UNITS >/dev/null 2>&1
+}
+
+ap_off()
+{
+    if ! ap_running && [ ! -f $DNSMASQ_DROPIN ]; then
+        local ip
+        ip=$(iface_ip)
+        result off ${ip:-none}
+    fi
+
+    log "stopping access point"
+    ap_off_internal
+
+    # dhcpcd runs in background (-b): the address usually comes later
+    local ip
+    ip=$(iface_ip)
+    result off ${ip:-none}
+}
+
+# run dir and request file, writable by the hmi user (also created at boot
+# by tmpfiles.d/wifi-ap.conf)
+prepare_run_dir()
+{
+    mkdir -p $RUN_DIR
+    [ -f $REQUEST_FILE ] || : > $REQUEST_FILE
+    chmod 666 $REQUEST_FILE
+}
+
+# run on/off as root: serialized, with the outcome recorded for "status"
+run_locked()
+{
+    RECORD_RESULT=1
+    trap 'rm -f $STATE_FILE' EXIT
+
+    # serialize concurrent calls (HMI and shell); the long running processes
+    # started from here (wpa_supplicant) must not inherit fd 9, or they would
+    # keep the lock until they exit
+    exec 9>$LOCK_FILE
+    flock -w 30 9 || result error busy
+
+    echo "$1 $$" > $STATE_FILE
+
+    [ "$1" = "on" ] && ap_on
+    ap_off
+}
+
+# root only (it has the password): the hmi user runs "status" without it
+[ -r $CONF_FILE ] && . $CONF_FILE
+
+case "$1" in
+    info|state|networks-set|scan|ap-set|names)
+        # structured data: Python helper, installed next to the VERSION file
+        helper=/usr/lib/alabs-mod-wifi/wifi-ap-helper
+        [ -x $helper ] || helper=$(dirname "$0")/wifi-ap-helper
+        exec $helper "$@"
+        ;;
+    status)
+        # read only, works as any user and must not print anything else:
+        # the HMI reads the first line
+        exec 2>/dev/null
+        print_status
+        ;;
+    on|off)
+        if [ "$(id -u)" != "0" ]; then
+            # hmi user: ask wifi-ap.path to do it as root
+            exec 2>/dev/null
+            echo "$1" > $REQUEST_FILE || result error no-permission
+            [ "$1" = "on" ] && result starting
+            result stopping
+        fi
+
+        prepare_run_dir
+
+        if [ "$2" = "-b" ]; then
+            rm -f $ERROR_FILE
+            # the child rewrites the state file with the same pid
+            ( "$0" "$1" >/dev/null 2>&1 < /dev/null & echo "$1 $!" > $STATE_FILE )
+            [ "$1" = "on" ] && result starting
+            result stopping
+        fi
+
+        run_locked "$1"
+        ;;
+    request)
+        # run by wifi-ap.service (as root) when the request file changes
+        prepare_run_dir
+        cmd=$(cat $REQUEST_FILE 2>/dev/null)
+        case "$cmd" in
+            on|off)
+                log "request from the HMI: $cmd"
+                rm -f $ERROR_FILE
+                # state first, so "status" never sees neither of them
+                echo "$cmd $$" > $STATE_FILE
+                : > $REQUEST_FILE
+                run_locked "$cmd"
+                ;;
+        esac
+        : > $REQUEST_FILE
+        exit 0
+        ;;
+    *)
+        echo "usage: wifi-ap on|off [-b] | status | info [--text] | state | networks-set | scan | ap-set | names" >&2
+        result error usage
+        ;;
+esac

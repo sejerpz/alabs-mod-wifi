@@ -1,0 +1,97 @@
+diff --git a/rtl8xxxu_core.c b/rtl8xxxu_core.c
+index 5d102a1..f53da09 100644
+--- a/rtl8xxxu_core.c
++++ b/rtl8xxxu_core.c
+@@ -19,6 +19,7 @@
+ #include <linux/errno.h>
+ #include <linux/slab.h>
+ #include <linux/module.h>
++#include <linux/version.h>
+ #include <linux/spinlock.h>
+ #include <linux/list.h>
+ #include <linux/usb.h>
+@@ -867,9 +868,33 @@ int rtl8xxxu_write_rfreg_mask(struct rtl8xxxu_priv *priv,
+ }
+ 
+ static int
+-rtl8xxxu_writeN(struct rtl8xxxu_priv *priv, u16 addr, u8 *buf, u16 len)
++rtl8xxxu_writeN_block(struct rtl8xxxu_priv *priv, u16 addr, u8 *buf, u16 size)
+ {
+ 	struct usb_device *udev = priv->udev;
++	int ret, try;
++
++	for (try = 0; try < 5; try++) {
++		ret = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
++				      REALTEK_USB_CMD_REQ, REALTEK_USB_WRITE,
++				      addr, 0, buf, size,
++				      RTW_USB_CONTROL_MSG_TIMEOUT);
++		if (ret == size)
++			return 0;
++
++		dev_info(&udev->dev,
++			 "%s: write at addr: %04x size: %04x failed (ret %d, try %d)\n",
++			 __func__, addr, size, ret, try);
++		if (ret == -ENODEV || ret == -ESHUTDOWN)
++			break;
++		usleep_range(1000, 2000);
++	}
++
++	return -EAGAIN;
++}
++
++static int
++rtl8xxxu_writeN(struct rtl8xxxu_priv *priv, u16 addr, u8 *buf, u16 len)
++{
+ 	int blocksize = priv->fops->writeN_block_size;
+ 	int ret, i, count, remainder;
+ 
+@@ -877,33 +902,21 @@ rtl8xxxu_writeN(struct rtl8xxxu_priv *priv, u16 addr, u8 *buf, u16 len)
+ 	remainder = len % blocksize;
+ 
+ 	for (i = 0; i < count; i++) {
+-		ret = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+-				      REALTEK_USB_CMD_REQ, REALTEK_USB_WRITE,
+-				      addr, 0, buf, blocksize,
+-				      RTW_USB_CONTROL_MSG_TIMEOUT);
+-		if (ret != blocksize)
+-			goto write_error;
++		ret = rtl8xxxu_writeN_block(priv, addr, buf, blocksize);
++		if (ret)
++			return ret;
+ 
+ 		addr += blocksize;
+ 		buf += blocksize;
+ 	}
+ 
+ 	if (remainder) {
+-		ret = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+-				      REALTEK_USB_CMD_REQ, REALTEK_USB_WRITE,
+-				      addr, 0, buf, remainder,
+-				      RTW_USB_CONTROL_MSG_TIMEOUT);
+-		if (ret != remainder)
+-			goto write_error;
++		ret = rtl8xxxu_writeN_block(priv, addr, buf, remainder);
++		if (ret)
++			return ret;
+ 	}
+ 
+ 	return len;
+-
+-write_error:
+-	dev_info(&udev->dev,
+-		 "%s: Failed to write block at addr: %04x size: %04x\n",
+-		 __func__, addr, blocksize);
+-	return -EAGAIN;
+ }
+ 
+ u32 rtl8xxxu_read_rfreg(struct rtl8xxxu_priv *priv,
+@@ -7344,7 +7357,9 @@ static int rtl8xxxu_sta_remove(struct ieee80211_hw *hw,
+ 
+ static const struct ieee80211_ops rtl8xxxu_ops = {
+ 	.tx = rtl8xxxu_tx,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+ 	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
++#endif
+ 	.add_interface = rtl8xxxu_add_interface,
+ 	.remove_interface = rtl8xxxu_remove_interface,
+ 	.config = rtl8xxxu_config,

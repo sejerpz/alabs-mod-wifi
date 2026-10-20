@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: GPL-2.0-only
+[Unit]
+Description=WiFi access point request from the HMI
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/wifi-ap request
+# wpa_supplicant started by "wifi-ap on" must survive the end of this unit
+KillMode=process

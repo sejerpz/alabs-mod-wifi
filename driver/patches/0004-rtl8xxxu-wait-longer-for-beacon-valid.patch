@@ -1,0 +1,42 @@
+Subject: [PATCH] rtl8xxxu: wait longer for the beacon valid bit
+
+After clearing BCN_VALID and sending the new beacon, the driver polled
+the bit for only ~1-2ms. The beacon goes through the same USB bulk
+endpoint as the other frames, so under load (e.g. a station loading a
+web page) it reaches the chip later and "Failed to read beacon valid
+bit" was logged every few seconds on the RTL8188EU, even though the
+beacon was eventually loaded.
+
+Poll for up to ~20ms (100 x 100-200us), still well below the beacon
+interval. The function runs from a workqueue, so sleeping is fine.
+
+Applies on top of 0003.
+---
+--- a/rtl8xxxu_core.c
++++ b/rtl8xxxu_core.c
+@@ -5695,16 +5695,24 @@
+ 	if (skb)
+ 		rtl8xxxu_tx(hw, NULL, skb);
+ 
++	/*
++	 * The beacon shares the USB bulk endpoint with the other frames, so
++	 * under load it can reach the chip several ms later: wait up to
++	 * ~20ms (the beacon interval is ~100ms) instead of ~2ms.
++	 */
+ 	retry = 100;
+ 	do {
+ 		val8 = rtl8xxxu_read8(priv, REG_TDECTRL + 2);
+ 		if (val8 & (BIT_BCN_VALID >> 16))
+ 			break;
+-		usleep_range(10, 20);
++		usleep_range(100, 200);
+ 	} while (--retry);
+ 
+ 	if (!retry)
+ 		dev_err(dev, "%s: Failed to read beacon valid bit\n", __func__);
++	else if (retry < 90)
++		dev_dbg(dev, "%s: beacon valid after %d polls\n", __func__,
++			100 - retry);
+ }
+ 
+ static void rtl8xxxu_update_beacon_work_callback(struct work_struct *work)
