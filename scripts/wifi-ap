@@ -22,7 +22,7 @@
 #   error <reason>                     the command failed (exit code 1)
 #
 # With -b, on/off run in background and print "starting"/"stopping" right
-# away: the HMI waits only a few hundred ms for an answer, starting the
+# away: the HMI waits only 1 s for an answer, starting the
 # access point takes a few seconds. Poll "status" for the result.
 #
 # The HMI shell runs as the unprivileged "hmi" user: when not run as root,

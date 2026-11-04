@@ -214,7 +214,7 @@ HMI through the serial console:
 | `error <reason>` | the command failed (exit code 1) |
 
 With `-b`, `on` and `off` run in background and answer `starting` /
-`stopping` right away: the HMI waits only 200 ms for an answer, while starting
+`stopping` right away: the HMI waits only 1 s for an answer, while starting
 the access point takes a few seconds. `status` doesn't take the lock, so it
 answers immediately also while `on`/`off` are running.
 
