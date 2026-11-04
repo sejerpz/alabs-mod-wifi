@@ -89,7 +89,10 @@ result()
 
 iface_ip()
 {
-    ip -4 -o addr show dev $IFACE 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }'
+    local addr
+
+    read -r _ _ _ addr _ < <(ip -4 -o addr show dev $IFACE 2>/dev/null)
+    echo "${addr%%/*}"
 }
 
 # true if the process is alive; /proc instead of "kill -0", which fails for
@@ -101,7 +104,11 @@ pid_alive()
 
 ap_running()
 {
-    [ -f $WPA_PID ] && pid_alive "$(cat $WPA_PID 2>/dev/null)"
+    local pid
+
+    [ -f $WPA_PID ] || return 1
+    read -r pid < $WPA_PID
+    pid_alive "$pid"
 }
 
 ap_supported()
@@ -116,7 +123,7 @@ print_status()
     # request from the hmi user not yet picked up by wifi-ap.path: if it
     # waits for too long wifi-ap.path is not running, report it instead of
     # being "starting" forever
-    cmd=$(cat $REQUEST_FILE 2>/dev/null)
+    read -r cmd < $REQUEST_FILE
     case "$cmd" in
         on|off)
             age=$(( $(date +%s) - $(stat -c %Y $REQUEST_FILE) ))
@@ -137,7 +144,7 @@ print_status()
         fi
     fi
 
-    if ! ip link show $IFACE >/dev/null 2>&1; then
+    if [ ! -e /sys/class/net/$IFACE ]; then
         result error no-wifi-device
     fi
 
@@ -152,7 +159,7 @@ print_status()
     ip=$(iface_ip)
     support=noap
     ap_supported && support=ap
-    error=$(cat $ERROR_FILE 2>/dev/null)
+    read -r error < $ERROR_FILE
     result off ${ip:-none} $support ${request_error:-$error}
 }
 
