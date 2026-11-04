@@ -65,6 +65,7 @@ DNSMASQ_DROPIN=$DNSMASQ_DROPIN_DIR/wifi-ap.conf
 STATE_FILE=$RUN_DIR/state
 ERROR_FILE=$RUN_DIR/last_error
 REQUEST_FILE=$RUN_DIR/request
+AP_CACHE_FILE=$RUN_DIR/ap_supported
 LOCK_FILE=/run/wifi-ap.lock
 
 CLIENT_UNITS="wpa-supplicant-wlan0.service dhcpcd-wlan0.service"
@@ -116,6 +117,23 @@ ap_supported()
     iw list 2>/dev/null | grep -q '^[[:space:]]*\* AP$'
 }
 
+# "iw list" is the slowest step of "status", which the HMI waits for: remember
+# the ifindex (a new one every time the adapter is plugged in) of an adapter
+# that supports AP mode
+ap_supported_cached()
+{
+    local index cached
+
+    read -r index < /sys/class/net/$IFACE/ifindex
+    read -r cached < $AP_CACHE_FILE
+    [ -n "$index" ] && [ "$index" = "$cached" ] && return 0
+
+    ap_supported || return 1
+    echo "$index" > $AP_CACHE_FILE
+}
+
+# only shell builtins and "ip": the HMI runs this while the audio threads take
+# the CPU, each process more makes it slower
 print_status()
 {
     local cmd pid age request_error=
@@ -158,7 +176,7 @@ print_status()
 
     ip=$(iface_ip)
     support=noap
-    ap_supported && support=ap
+    ap_supported_cached && support=ap
     read -r error < $ERROR_FILE
     result off ${ip:-none} $support ${request_error:-$error}
 }
@@ -328,7 +346,8 @@ prepare_run_dir()
 {
     mkdir -p $RUN_DIR
     [ -f $REQUEST_FILE ] || : > $REQUEST_FILE
-    chmod 666 $REQUEST_FILE
+    [ -f $AP_CACHE_FILE ] || : > $AP_CACHE_FILE
+    chmod 666 $REQUEST_FILE $AP_CACHE_FILE
 }
 
 # run on/off as root: serialized, with the outcome recorded for "status"
