@@ -44,7 +44,7 @@ module loads, but the kernel crashes with an Oops in `mod_sysfs_setup` when a mo
 the repository config is loaded.
 
 **Modules for the Dwarf must be built with the config taken from the device.** It is saved in
-`driver/dwarf/config-6.1.15-rt7-moddwarf`. To get it again:
+`driver/moddwarf/config-6.1.15-rt7-moddwarf`. To get it again:
 
 ```bash
 scp -O root@192.168.51.1:/proc/config.gz .
@@ -114,13 +114,14 @@ The build runs inside the mod-plugin-builder docker container.
    ```
 
    `build.sh` copies the device config into the kernel tree (`olddefconfig` + `modules_prepare`
-   if it changed), builds the module and writes `driver/out/rtl8xxxu.ko`. Override `KDIR` and
-   `TOOLCHAIN_BIN` if your paths differ.
+   if it changed), builds the module and writes `driver/out/6.1.15-rt7-moddwarf/rtl8xxxu.ko`.
+   Override `KDIR` and `TOOLCHAIN_BIN` if your paths differ. `PLATFORM=modduox ./build.sh`
+   builds the modules of the MOD Duo X (see the [README](../README.md#mod-duo-x)).
 
 Check the result:
 
 ```bash
-strings driver/out/rtl8xxxu.ko | grep vermagic
+strings driver/out/6.1.15-rt7-moddwarf/rtl8xxxu.ko | grep vermagic
 ```
 
 It must print `vermagic=6.1.15-rt7-moddwarf SMP preempt_rt mod_unload aarch64`.
@@ -134,7 +135,7 @@ mkdir -p /lib/modules/6.1.15-rt7-moddwarf/updates
 
 # from the PC: only the firmware missing from the image, in /lib/firmware-system
 # (/lib/firmware is /data/firmware, see the README)
-scp -O driver/out/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
+scp -O driver/out/6.1.15-rt7-moddwarf/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
 scp -O firmware/rtlwifi/rtl8192fufw.bin firmware/rtlwifi/rtl8710bufw_SMIC.bin firmware/rtlwifi/rtl8710bufw_UMC.bin \
     firmware/rtlwifi/LICENCE.rtlwifi_firmware.txt root@192.168.51.1:/lib/firmware-system/rtlwifi/
 scp -O firmware/regulatory.db firmware/regulatory.db.p7s firmware/LICENSE.wireless-regdb root@192.168.51.1:/lib/firmware-system/
@@ -155,7 +156,9 @@ To revert, delete `updates/rtl8xxxu.ko` and run `depmod -a`.
 driver/
 ├── rtl8xxxu_*.c, *.h, Makefile        driver sources from Linux v6.6, with the patches applied
 ├── patches/                            changes against v6.6
-├── dwarf/config-6.1.15-rt7-moddwarf    kernel config of the official Dwarf kernel
+├── compat.h                            what the v6.6 driver uses and the Duo X kernels lack
+├── moddwarf/config-6.1.15-rt7-moddwarf kernel config of the official Dwarf kernel
+├── modduox/config-4.*-duox             kernel configs of the official Duo X kernels
 └── build.sh                            build script (run inside the docker container)
 firmware/                               firmware from linux-firmware, regulatory db from wireless-regdb
 ```

@@ -1,16 +1,20 @@
 # alabs-mod-wifi
 
-WiFi access point support for the MOD Dwarf (aLabs custom image).
+WiFi access point support for the MOD Dwarf and the MOD Duo X (aLabs custom
+image).
 
-With a USB WiFi dongle the Dwarf can either join a WiFi network (stock image
+With a USB WiFi dongle the device can either join a WiFi network (stock image
 behaviour) or become an access point, so a phone or tablet can reach mod-ui
 without a router.
+
+The MOD Duo X support is built but **not tested on a device yet** (see
+[MOD Duo X](#mod-duo-x)).
 
 ## Layout
 
 | Path | Content |
 |---|---|
-| `driver/` | `rtl8xxxu` driver backported from Linux 6.6 to the Dwarf kernel (6.1.15-rt7), with the patches in `driver/patches/` already applied |
+| `driver/` | `rtl8xxxu` driver backported from Linux 6.6 to the Dwarf kernel (6.1.15-rt7) and the Duo X kernels (4.4.167-rt176, 4.9.123-rt125), with the patches in `driver/patches/` already applied; `moddwarf/` and `modduox/` have the configs of the official kernels |
 | `firmware/` | firmware for all the supported Realtek dongles (from linux-firmware) and `regulatory.db` (from wireless-regdb), with their licences and `SHA256SUMS`: see [Licensing](#licensing) |
 | `scripts/wifi-ap` | switches `wlan0` between client mode and access point mode |
 | `scripts/wifi-ap-helper` | data commands of `wifi-ap` (Python 3.4), installed in `/usr/lib/alabs-mod-wifi/` |
@@ -41,6 +45,8 @@ sources (the `.c`/`.h` files in `driver/` already include them):
   under load the beacon reaches the chip after the ~2 ms the driver waited.
 - `0005` sends the beacon again (up to 3 attempts) when the chip did not get
   it, instead of leaving the AP without beacons until the next update.
+- `0006` builds on the Duo X kernels 4.4 and 4.9 (`compat.h` and version
+  checks); the 6.1 build is unchanged.
 
 ### Supported chips
 
@@ -96,17 +102,20 @@ the other "untested" IDs of the driver are not included).
 
 ### Build
 
-The module must be built against the Dwarf kernel tree, inside the
-mod-plugin-builder docker container, after the kernel has been prepared with
-`./bootstrap.sh moddwarf kernel` and `./build moddwarf kernel`:
+The module must be built against the kernel trees of the platform, inside the
+mod-plugin-builder docker container. For the Dwarf, after the kernel has been
+prepared with `./bootstrap.sh moddwarf kernel` and `./build moddwarf kernel`:
 
 ```
 cd driver
 ./build.sh
 ```
 
-The module is written to `driver/out/rtl8xxxu.ko`. `KDIR` and `TOOLCHAIN_BIN`
-can be overridden from the environment.
+For the Duo X, `PLATFORM=modduox ./build.sh` downloads the kernel sources in
+`/root/mod-workdir/modduox-kernel` on the first run (see [MOD Duo X](#mod-duo-x)).
+
+The module is written to `driver/out/<kernel>/rtl8xxxu.ko`. `KDIR` (Dwarf only)
+and `TOOLCHAIN_BIN` can be overridden from the environment.
 
 ### Install
 
@@ -115,7 +124,7 @@ The module goes in `updates/`, which takes precedence over the original
 regulatory database go in `/lib/firmware-system/` (see the notes above):
 
 ```
-scp -O driver/out/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
+scp -O driver/out/6.1.15-rt7-moddwarf/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
 ssh root@192.168.51.1 depmod -a
 cd firmware
 scp -O rtlwifi/rtl8192fufw.bin rtlwifi/rtl8710bufw_SMIC.bin rtlwifi/rtl8710bufw_UMC.bin \
@@ -138,31 +147,31 @@ make release
 ```
 
 builds the module (`make module`: `driver/build.sh` run with `docker exec` in
-the container that has the Dwarf kernel tree, `CONTAINER=nam` by default) and
+the container that has the kernel trees, `CONTAINER=nam` by default) and
 packs `dist/alabs-mod-wifi-<version>-<platform>.tar.gz` and its `.sha256`
-(`PLATFORM=moddwarf` by default, the only one supported for now; the image
+(`PLATFORM=moddwarf` by default, or `PLATFORM=modduox`; the image
 downloads the archive of its own platform). It
 refuses to run with uncommitted or untracked files: the archive records the
 commit it was made from, whose sources are the sources of the module.
 
-The archive is an overlay of the Dwarf root filesystem (owner root, final
+The archive is an overlay of the device root filesystem (owner root, final
 paths and permissions), to be extracted with `tar -xpf` and followed by
-`depmod`:
+`depmod` for each kernel in `usr/lib/modules/`:
 
 | Path | Content |
 |---|---|
-| `usr/lib/modules/6.1.15-rt7-moddwarf/updates/` | `rtl8xxxu.ko` |
+| `usr/lib/modules/<kernel>/updates/` | `rtl8xxxu.ko`: `6.1.15-rt7-moddwarf` on the Dwarf, `4.4.167-rt176-duox` and `4.9.123-rt125-duox` on the Duo X |
 | `usr/lib/firmware-system/rtlwifi/` | the firmware missing from the image and its licence |
-| `usr/lib/firmware-system/` | `regulatory.db`, `regulatory.db.p7s` and their licence |
+| `usr/lib/firmware-system/` | Dwarf only: `regulatory.db`, `regulatory.db.p7s` and their licence |
 | `usr/bin/` | `wifi-ap` |
-| `usr/lib/alabs-mod-wifi/` | `wifi-ap-helper`, `VERSION`, `LICENSE`, `BUILDINFO` (commit, kernel, vermagic, sha256 of the module) |
+| `usr/lib/alabs-mod-wifi/` | `wifi-ap-helper`, `VERSION`, `LICENSE`, `BUILDINFO` (commit, and kernel, vermagic, sha256 of each module) |
 | `etc/systemd/system/` | `wifi-ap.path`, `wifi-ap.service`, enabled in `multi-user.target.wants/` |
 | `etc/tmpfiles.d/` | `wifi-ap.conf` |
 | `usr/lib/diagnostics-logs/providers.d/` | `50-wifi` |
 
 To publish a version: update `VERSION`, commit, tag it `v<version>`, run
-`make release`, push the tag and attach the two files of `dist/` to the GitHub
-release of that tag.
+`make release` and `make release PLATFORM=modduox`, push the tag and attach
+the four files of `dist/` to the GitHub release of that tag.
 
 ## wifi-ap
 
@@ -269,13 +278,14 @@ AP_PSK="moddwarf"     # WPA2 passphrase, 8..63 characters
 AP_CHANNEL=6          # 2.4 GHz channel, 1..11
 ```
 
-The default passphrase is the same on every device: change it.
+The default name and passphrase are the device name, from `/etc/hostname`
+(`moddwarf` or `modduox`): the same on every device, change them.
 
 ### Connecting a phone
 
 - mod-ui is at `http://192.168.60.1`. avahi also publishes the device name on
-  the access point, so `http://moddwarf.local` works where the browser
-  supports mDNS.
+  the access point, so `http://moddwarf.local` (`http://modduox.local`) works
+  where the browser supports mDNS.
 - The access point has no internet access (no gateway or DNS is announced):
   when the phone asks, choose to stay connected to the network.
 - If the phone also knows a WiFi network with internet that is in range (e.g.
@@ -300,6 +310,41 @@ grep -E "AP-STA|inactiv|deauth|disassoc" /run/wifi-ap/wpa_supplicant.log
 ```
 
 The log grows quickly and lives in RAM: don't leave debug mode on.
+
+## MOD Duo X
+
+The Duo X image (v1.13.5.3316) has the same userland as the Dwarf one
+(wpa_supplicant, dnsmasq, dhcpcd, iw, Python 3.4, systemd units, `hmi` user,
+firmware in `/lib/firmware-system/rtlwifi/`): `wifi-ap`, the systemd units and
+the firmware are the same. The differences are in the kernel:
+
+- Two kernels, the board decides which one boots: `4.4.167-rt176-duox`
+  (`gr-rk3399`) and `4.9.123-rt125-duox` (`cl-imx8mq`). The release has a
+  module for each of them.
+- Their `rtl8xxxu` is the 4.4/4.9 one: no RTL8188EU, no AP mode. The v6.6
+  driver is built for them with `0006`.
+- The sources are the heads of
+  [mod-audio/linux-rk3399](https://github.com/mod-audio/linux-rk3399/tree/develop-4.4-rt176)
+  `develop-4.4-rt176` (with the RT patch) and
+  [mod-audio/linux-imx](https://github.com/mod-audio/linux-imx/tree/rel_imx_4.9.123_2.3.0_8mm_ga-duox)
+  `rel_imx_4.9.123_2.3.0_8mm_ga-duox`, plus `patch-4.9.146-rt125` from
+  kernel.org (it applies cleanly and gives the `-rt125` of the official
+  kernel). The configs in `driver/modduox/` are the `/proc/config.gz` of the
+  official kernels, extracted from the images in `/boot` with
+  `scripts/extract-ikconfig`. The official kernels have `CONFIG_EXPERT=y`
+  without `CONFIG_DEBUG_KERNEL`, so `build.sh` removes the
+  `select DEBUG_KERNEL` of `EXPERT` from the trees, and stops if
+  `olddefconfig` changes any option set on the device.
+- The official kernels were built with gcc 4.9.4 (crosstool-NG 1.22, the old
+  `modduox` toolchain); the module is built with the gcc 9.4.0 of
+  mod-plugin-builder (the same of `modduox-new`), with the gcc warnings
+  not fatal (`scripts/gcc-wrapper.py` of the rk3399 tree).
+- Checked against the image: vermagic, size of `struct module` (the same of
+  the official modules) and every symbol the module imports.
+- Kernels older than 4.15 don't load `regulatory.db` and the image has no
+  `crda`: the Duo X stays in the world regulatory domain (channels 1-11 are
+  fine for the access point), so `regulatory.db` is not installed.
+- No LED class device on 4.4 (no `brightness_set_blocking`).
 
 ## Licensing
 

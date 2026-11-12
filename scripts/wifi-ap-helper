@@ -11,7 +11,7 @@
 #   wifi-ap-helper names           configured network names, one per line
 #
 # Called by "wifi-ap <command>"; installed in /usr/lib/alabs-mod-wifi/. Must run as
-# root. Runs on the Python 3.4 of the Dwarf: no f-strings, no subprocess.run,
+# root. Runs on the Python 3.4 of the Dwarf and the Duo X: no f-strings, no subprocess.run,
 # no bytes.hex().
 
 import binascii
@@ -34,7 +34,7 @@ AP_CONF = os.path.join(DATA_DIR, 'wifi-ap.conf')
 WPA_CTRL_DIR = '/var/run/wpa_supplicant'
 CLIENT_UNITS = ['wpa-supplicant-wlan0.service', 'dhcpcd-wlan0.service']
 
-# same defaults as wifi-ap
+# same defaults as wifi-ap: the device name, moddwarf or modduox
 AP_DEFAULTS = {'ssid': 'moddwarf', 'password': 'moddwarf', 'channel': 6}
 
 # header of a new /data/wpa_supplicant.conf, as /etc/wpa_supplicant.conf
@@ -663,6 +663,9 @@ def shell_unquote(value):
 
 def read_ap_conf():
     conf = dict(AP_DEFAULTS)
+    name = read_file('/etc/hostname').strip()
+    if name:
+        conf['ssid'] = conf['password'] = name
     lines = read_file(AP_CONF).splitlines()
     for line in lines:
         key, sep, value = line.partition('=')

@@ -82,7 +82,7 @@ The module is built for the Dwarf kernel `6.1.15-rt7-moddwarf`
 
 | File | Installed to |
 |---|---|
-| `driver/out/rtl8xxxu.ko` | `/lib/modules/6.1.15-rt7-moddwarf/updates/` |
+| `driver/out/6.1.15-rt7-moddwarf/rtl8xxxu.ko` | `/lib/modules/6.1.15-rt7-moddwarf/updates/` |
 | `firmware/rtlwifi/rtl8192fufw.bin`, `rtl8710bufw_SMIC.bin`, `rtl8710bufw_UMC.bin` and the licence | `/lib/firmware-system/rtlwifi/` |
 | `firmware/regulatory.db`, `regulatory.db.p7s` and the licence | `/lib/firmware-system/` |
 
@@ -109,7 +109,7 @@ It must print `6.1.15-rt7-moddwarf`. With any other kernel the module will not l
 3. From your PC, in the repository root, copy the files:
 
    ```bash
-   scp -O driver/out/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
+   scp -O driver/out/6.1.15-rt7-moddwarf/rtl8xxxu.ko root@192.168.51.1:/lib/modules/6.1.15-rt7-moddwarf/updates/
    scp -O firmware/rtlwifi/rtl8192fufw.bin firmware/rtlwifi/rtl8710bufw_SMIC.bin firmware/rtlwifi/rtl8710bufw_UMC.bin \
        firmware/rtlwifi/LICENCE.rtlwifi_firmware.txt root@192.168.51.1:/lib/firmware-system/rtlwifi/
    scp -O firmware/regulatory.db firmware/regulatory.db.p7s firmware/LICENSE.wireless-regdb root@192.168.51.1:/lib/firmware-system/
