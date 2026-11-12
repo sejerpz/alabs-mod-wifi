@@ -3,18 +3,24 @@
 # Build the rtl8xxxu (v6.6 backport) module for the kernels of a MOD platform.
 #
 #   PLATFORM=moddwarf  kernel 6.1.15-rt7-moddwarf (default)
+#   PLATFORM=modduo    kernel 6.1.15-rt7-modduo (mainline kernel of the Duo,
+#                      armhf): the legacy 3.4.104 kernel has no wireless stack
 #   PLATFORM=modduox   kernels 4.4.167-rt176-duox (gr-rk3399 board) and
 #                      4.9.123-rt125-duox (cl-imx8mq board): the Duo X image
 #                      has both and boots the one of its board
 #
 # Run inside the mod-plugin-builder docker container. For moddwarf, after
 # "./bootstrap.sh moddwarf kernel" and "./build moddwarf kernel" have prepared the
-# kernel tree; for modduox the kernel sources (mod-audio/linux-rk3399 and
-# mod-audio/linux-imx) are downloaded in ${WORKDIR}/modduox-kernel on the first run.
+# kernel tree; for modduo the same kernel sources with the RT patch are extracted
+# in ${WORKDIR}/modduo-kernel, and built with the Debian armhf cross compiler
+# (apt-get install gcc-arm-linux-gnueabihf); for modduox the kernel sources
+# (mod-audio/linux-rk3399 and mod-audio/linux-imx) are downloaded in
+# ${WORKDIR}/modduox-kernel on the first run.
 #
 #   KDIR           kernel source tree, moddwarf only (default: buildroot moddwarf-kernel tree)
 #   TOOLCHAIN_BIN  directory of the aarch64-modaudio-linux-gnu- toolchain
 #   WORKDIR        mod-plugin-builder workdir (default: /root/mod-workdir)
+#   MPB_DIR        mod-plugin-builder sources (default: /root/mod-plugin-builder)
 #
 # Output: out/<kernel version>/rtl8xxxu.ko
 
@@ -24,17 +30,29 @@ cd "$(dirname "${0}")"
 
 PLATFORM=${PLATFORM:=moddwarf}
 WORKDIR=${WORKDIR:=/root/mod-workdir}
+MPB_DIR=${MPB_DIR:=/root/mod-plugin-builder}
 TOOLCHAIN_BIN=${TOOLCHAIN_BIN:=${WORKDIR}/moddwarf-new/toolchain/bin}
 
 export PATH="${TOOLCHAIN_BIN}:${PATH}"
 
-# extra make arguments of the kernel build
+# architecture, compiler and extra make arguments of the kernel build
+KARCH=arm64
+KCROSS=aarch64-modaudio-linux-gnu-
 KMAKE_ARGS=
+
+# options set by probing the compiler: they depend on the compiler, not on the
+# kernel (the module is not built with the compiler of the official kernel)
+COMPILER_OPTIONS='^CONFIG_(CC_VERSION_TEXT|GCC_VERSION|AS_VERSION|LD_VERSION|CC_HAS_[A-Z0-9_]*|CC_HAVE_[A-Z0-9_]*|CC_NO_[A-Z0-9_]*|HAVE_KCSAN_COMPILER)='
+
+# kernel options of a config, without the ones of the compiler
+kernel_options() {
+  grep '^CONFIG_' "${1}" | grep -v -E "${COMPILER_OPTIONS}"
+}
 
 # build_module <kernel version> <kernel tree> <config taken from the device>
 build_module() {
   local kver=${1} kdir=${2} config=${3}
-  local make="make -C ${kdir} ARCH=arm64 CROSS_COMPILE=aarch64-modaudio-linux-gnu- -j$(nproc) ${KMAKE_ARGS}"
+  local make="make -C ${kdir} ARCH=${KARCH} CROSS_COMPILE=${KCROSS} -j$(nproc) ${KMAKE_ARGS}"
 
   # the official kernels are NOT built with mod-plugin-builder's linux.config:
   # modules must be built against the config taken from the device (/proc/config.gz)
@@ -42,7 +60,7 @@ build_module() {
     cp "${config}" "${kdir}/.config"
     ${make} olddefconfig
     # the options set must be exactly the ones of the device
-    if ! diff <(grep '^CONFIG_' "${config}") <(grep '^CONFIG_' "${kdir}/.config"); then
+    if ! diff <(kernel_options "${config}") <(kernel_options "${kdir}/.config"); then
       echo "the kernel tree ${kdir} changes the config of the device"
       exit 1
     fi
@@ -97,6 +115,23 @@ moddwarf)
   KDIR=${KDIR:=$(ls -d ${WORKDIR}/moddwarf-kernel/build/linux-cbce1363d7f6a66636123dcae3de20db8c9429d2)}
   build_module 6.1.15-rt7-moddwarf "${KDIR}" moddwarf/config-6.1.15-rt7-moddwarf
   ;;
+modduo)
+  # the Duo mainline kernel has the sources of the Dwarf one: moddevices/linux-mainline
+  # cbce1363 with the 6.1.12-rt7 patch of mod-plugin-builder (the other Dwarf patches
+  # only change .c files of usb gadget, cpufreq and irq, and the arm64 Kconfig)
+  KARCH=arm
+  KCROSS=arm-linux-gnueabihf-
+  KDIR=${WORKDIR}/modduo-kernel/linux-cbce1363d7f6a66636123dcae3de20db8c9429d2
+  if [ ! -f "${KDIR}/.rt-patched" ]; then
+    rm -rf "${KDIR}"
+    mkdir -p "${WORKDIR}/modduo-kernel"
+    tar -xzf "${WORKDIR}/download/linux-cbce1363d7f6a66636123dcae3de20db8c9429d2.tar.gz" -C "${WORKDIR}/modduo-kernel"
+    touch "${KDIR}/.scmversion"
+    patch -d "${KDIR}" -p1 -f -s < "${MPB_DIR}/kernel/board/moddwarf/patches/4001-6.1.12-rt7.patch"
+    touch "${KDIR}/.rt-patched"
+  fi
+  build_module 6.1.15-rt7-modduo "${KDIR}" modduo/config-6.1.15-rt7-modduo
+  ;;
 modduox)
   # host tools of 4.x kernels (dtc) don't link with gcc >= 10 without -fcommon;
   # the gcc 9 warnings unknown to the gcc 4.9 the kernels were built with must
@@ -116,7 +151,7 @@ modduox)
     modduox/config-4.9.123-rt125-duox
   ;;
 *)
-  echo "PLATFORM=${PLATFORM} is not supported (supported: moddwarf modduox)"
+  echo "PLATFORM=${PLATFORM} is not supported (supported: moddwarf modduo modduox)"
   exit 1
   ;;
 esac

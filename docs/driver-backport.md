@@ -115,8 +115,10 @@ The build runs inside the mod-plugin-builder docker container.
 
    `build.sh` copies the device config into the kernel tree (`olddefconfig` + `modules_prepare`
    if it changed), builds the module and writes `driver/out/6.1.15-rt7-moddwarf/rtl8xxxu.ko`.
-   Override `KDIR` and `TOOLCHAIN_BIN` if your paths differ. `PLATFORM=modduox ./build.sh`
-   builds the modules of the MOD Duo X (see the [README](../README.md#mod-duo-x)).
+   Override `KDIR` and `TOOLCHAIN_BIN` if your paths differ. `PLATFORM=modduo ./build.sh`
+   builds the module of the MOD Duo (see the [README](../README.md#mod-duo)),
+   `PLATFORM=modduox ./build.sh` the modules of the MOD Duo X (see the
+   [README](../README.md#mod-duo-x)).
 
 Check the result:
 
@@ -158,6 +160,7 @@ driver/
 ├── patches/                            changes against v6.6
 ├── compat.h                            what the v6.6 driver uses and the Duo X kernels lack
 ├── moddwarf/config-6.1.15-rt7-moddwarf kernel config of the official Dwarf kernel
+├── modduo/config-6.1.15-rt7-modduo     kernel config of the official Duo mainline kernel
 ├── modduox/config-4.*-duox             kernel configs of the official Duo X kernels
 └── build.sh                            build script (run inside the docker container)
 firmware/                               firmware from linux-firmware, regulatory db from wireless-regdb

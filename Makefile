@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# alabs-mod-wifi binary release for the MOD Dwarf and the MOD Duo X
+# alabs-mod-wifi binary release for the MOD Dwarf, the MOD Duo and the MOD Duo X
 #
 #   make module    build driver/out/<kernel>/rtl8xxxu.ko for the kernels of the
 #                  platform, in the mod-plugin-builder docker container (see driver/build.sh)
@@ -8,7 +8,7 @@
 #                  an overlay of the device root filesystem, plus its .sha256
 #   make clean     remove dist/
 #
-#   PLATFORM       moddwarf (default) or modduox; the archive name carries it, and
+#   PLATFORM       moddwarf (default), modduo or modduox; the archive name carries it, and
 #                  the aLabs image downloads the archive of its own platform
 #   CONTAINER      running container used to build the module (default: nam)
 #   CONTAINER_DIR  this repository inside the container
@@ -23,19 +23,26 @@ PLATFORM      ?= moddwarf
 # The firmware already in /lib/firmware-system/rtlwifi/ is not replaced, see
 # "Supported chips" in the README
 ifeq ($(PLATFORM),moddwarf)
-# image v1.13.5.3315
+# image v1.14.0.3370 (the kernel and its modules are the ones of v1.13.5.3315)
 KVERS         := 6.1.15-rt7-moddwarf
 FIRMWARE_ADD  := rtl8192fufw.bin rtl8710bufw_SMIC.bin rtl8710bufw_UMC.bin
 REGDB         := yes
+else ifeq ($(PLATFORM),modduo)
+# image v1.14.0.3370: the mainline kernel, same firmware and regulatory database
+# as the Dwarf; the legacy kernel (3.4.104-rt139-modduo) has no wireless stack
+KVERS         := 6.1.15-rt7-modduo
+FIRMWARE_ADD  := rtl8192fufw.bin rtl8710bufw_SMIC.bin rtl8710bufw_UMC.bin
+REGDB         := yes
 else ifeq ($(PLATFORM),modduox)
-# image v1.13.5.3316: one kernel per board (gr-rk3399, cl-imx8mq), same firmware
-# as the Dwarf image; kernels older than 4.15 don't load regulatory.db (and the
-# image has no crda): they keep the world regulatory domain
+# image v1.14.0.3370 (kernels and modules of v1.13.5.3316): one kernel per board
+# (gr-rk3399, cl-imx8mq), same firmware as the Dwarf image; kernels older than
+# 4.15 don't load regulatory.db (and the image has no crda): they keep the world
+# regulatory domain
 KVERS         := 4.4.167-rt176-duox 4.9.123-rt125-duox
 FIRMWARE_ADD  := rtl8192fufw.bin rtl8710bufw_SMIC.bin rtl8710bufw_UMC.bin
 REGDB         := no
 else
-$(error PLATFORM=$(PLATFORM) is not supported (supported: moddwarf modduox))
+$(error PLATFORM=$(PLATFORM) is not supported (supported: moddwarf modduo modduox))
 endif
 
 NAME          := alabs-mod-wifi-$(VERSION)-$(PLATFORM)
