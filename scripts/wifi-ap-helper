@@ -34,8 +34,8 @@ AP_CONF = os.path.join(DATA_DIR, 'wifi-ap.conf')
 WPA_CTRL_DIR = '/var/run/wpa_supplicant'
 CLIENT_UNITS = ['wpa-supplicant-wlan0.service', 'dhcpcd-wlan0.service']
 
-# same defaults as wifi-ap: the device name, moddwarf or modduox
-AP_DEFAULTS = {'ssid': 'moddwarf', 'password': 'moddwarf', 'channel': 6}
+# same defaults as wifi-ap: the ssid is the device name, moddwarf or modduox
+AP_DEFAULTS = {'ssid': 'moddwarf', 'password': 'starless', 'channel': 6}
 
 # header of a new /data/wpa_supplicant.conf, as /etc/wpa_supplicant.conf
 WPA_CONF_HEADER = ['ctrl_interface=%s' % WPA_CTRL_DIR, 'ap_scan=1']
@@ -665,7 +665,7 @@ def read_ap_conf():
     conf = dict(AP_DEFAULTS)
     name = read_file('/etc/hostname').strip()
     if name:
-        conf['ssid'] = conf['password'] = name
+        conf['ssid'] = name
     lines = read_file(AP_CONF).splitlines()
     for line in lines:
         key, sep, value = line.partition('=')

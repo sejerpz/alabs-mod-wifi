@@ -40,8 +40,8 @@
 # debug output (-dd -t) logged to /run/wifi-ap/wpa_supplicant.log.
 #
 # Optional settings in /data/wifi-ap.conf (shell syntax):
-#   AP_SSID="moddwarf"       # default: the device name (/etc/hostname),
-#   AP_PSK="moddwarf"        # moddwarf or modduox; WPA2 passphrase, 8..63 characters
+#   AP_SSID="moddwarf"       # default: the device name (/etc/hostname), moddwarf or modduox
+#   AP_PSK="starless"        # WPA2 passphrase, 8..63 characters
 #   AP_CHANNEL=6             # 2.4 GHz channel 1..11
 
 IFACE=wlan0
@@ -53,7 +53,7 @@ DHCP_RANGE=192.168.60.50,192.168.60.150,12h
 DEVICE_NAME=moddwarf
 read -r DEVICE_NAME 2>/dev/null < /etc/hostname
 AP_SSID="${DEVICE_NAME:-moddwarf}"
-AP_PSK="${DEVICE_NAME:-moddwarf}"
+AP_PSK="starless"
 AP_CHANNEL=6
 
 CONF_FILE=/data/wifi-ap.conf

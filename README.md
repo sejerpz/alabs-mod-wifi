@@ -274,12 +274,13 @@ Optional settings in `/data/wifi-ap.conf`:
 
 ```
 AP_SSID="moddwarf"
-AP_PSK="moddwarf"     # WPA2 passphrase, 8..63 characters
+AP_PSK="starless"     # WPA2 passphrase, 8..63 characters
 AP_CHANNEL=6          # 2.4 GHz channel, 1..11
 ```
 
-The default name and passphrase are the device name, from `/etc/hostname`
-(`moddwarf` or `modduox`): the same on every device, change them.
+The default name is the device name, from `/etc/hostname` (`moddwarf` or
+`modduox`), and the default passphrase is `starless`: the same on every
+device, change them.
 
 ### Connecting a phone
 
