@@ -7,7 +7,8 @@ With a USB WiFi dongle the device can either join a WiFi network (stock image
 behaviour) or become an access point, so a phone or tablet can reach mod-ui
 without a router.
 
-The MOD Duo X support is built but **not tested on a device yet** (see
+The MOD Duo X support is **tested only on the `gr-rk3399` board** (kernel
+4.4.167-rt176): the `cl-imx8mq` board (kernel 4.9.123-rt125) is not tested (see
 [MOD Duo X](#mod-duo-x)).
 
 ## Layout
@@ -346,6 +347,12 @@ the firmware are the same. The differences are in the kernel:
   `crda`: the Duo X stays in the world regulatory domain (channels 1-11 are
   fine for the access point), so `regulatory.db` is not installed.
 - No LED class device on 4.4 (no `brightness_set_blocking`).
+- Tested only on a `gr-rk3399` Duo X (`4.4.167-rt176-duox`) with an RTL8188EU
+  dongle: the module loads, `wifi-ap on`/`off` work from the HMI request flow
+  and a phone joins the access point and opens mod-ui; client mode was not
+  tested. The `cl-imx8mq` module (`4.9.123-rt125-duox`, RT patch from
+  kernel.org) has only the checks against the image above, it was never
+  loaded on a device.
 
 ## Licensing
 
