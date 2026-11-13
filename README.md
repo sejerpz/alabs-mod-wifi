@@ -10,7 +10,7 @@ without a router.
 The MOD Duo X support is **tested only on the `gr-rk3399` board** (kernel
 4.4.167-rt176): the `cl-imx8mq` board (kernel 4.9.123-rt125) is not tested (see
 [MOD Duo X](#mod-duo-x)). On the MOD Duo the module works, but **clients cannot
-connect yet**: the AES of the Duo libcrypto gives wrong results, so the
+connect yet**: the libcrypto of the Duo image computes AES wrong, so the
 WPA2 handshake fails (see [MOD Duo](#mod-duo)).
 
 ## Layout
@@ -355,13 +355,16 @@ The device name is `modduo`.
   `wifi-ap status` answers in about 150 ms. **Clients see the network but
   cannot connect**: they answer message 1/4 of the WPA2 handshake (the
   passphrase is right) and ignore message 3/4, because the GTK in it is
-  wrapped with a wrong AES. On that Duo the AES of `/usr/lib/libcrypto.so.1.0.0`
-  (OpenSSL 1.0.2g, used by wpa_supplicant) fails the FIPS-197 test vector, and
-  so do the SHA-256 of libcrypto and of busybox (`printf abc | sha256sum`);
-  SHA-1, MD5, SHA-512 and the SHA-256 of OpenSSH are right. The files are
-  identical to the image, and it happens without the WiFi module too: it is a
-  problem of that Duo with the mainline kernel, not of this package. Not
-  checked with the legacy kernel or on another Duo.
+  wrapped with a wrong AES. The `/usr/lib/libcrypto.so.1.0.0` of the Duo
+  image (OpenSSL 1.0.2g, `linux-armv4` with `AES_ASM` and `SHA256_ASM`, used
+  by wpa_supplicant) fails the FIPS-197 AES test vector and computes SHA-256
+  wrong (`printf abc | sha256sum`, which is coreutils on libcrypto, gives
+  `e9bbed70…`); its SHA-1 and SHA-512 are right. It fails the same way under
+  qemu (`-cpu cortex-a7` and `-cpu max`), so it is a defect of that build of
+  the library, not of the hardware or the kernel; the SHA-256 of busybox and of
+  OpenSSH (which don't use libcrypto) are right. The library is the same in
+  v1.13.5.3317 and v1.14.0.3370. WiFi on the Duo needs a working libcrypto
+  (or a wpa_supplicant that doesn't use it).
 
 ## MOD Duo X
 
