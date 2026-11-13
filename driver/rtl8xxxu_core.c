@@ -6690,6 +6690,15 @@ static int rtl8xxxu_add_interface(struct ieee80211_hw *hw,
 		rtl8xxxu_write16(priv, REG_TSFTR_SYN_OFFSET, 0x7fff); /* ~32ms */
 		rtl8xxxu_write8(priv, REG_DUAL_TSF_RST, DUAL_TSF_RESET_TSF0);
 
+		/*
+		 * With bit 3 clear the chip drops the beacon from its queue
+		 * after sending it, and sends no more beacons until the next
+		 * update (the vendor driver sets bits 3 and 4).
+		 */
+		val8 = rtl8xxxu_read8(priv, REG_MBID_NUM);
+		val8 |= BIT(3) | BIT(4);
+		rtl8xxxu_write8(priv, REG_MBID_NUM, val8);
+
 		/* enable BCN0 function */
 		rtl8xxxu_write8(priv, REG_BEACON_CTRL,
 				BEACON_DISABLE_TSF_UPDATE |

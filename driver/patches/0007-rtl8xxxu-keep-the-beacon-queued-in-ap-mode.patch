@@ -1,0 +1,33 @@
+Subject: [PATCH] rtl8xxxu: keep the beacon queued in AP mode
+
+With bit 3 of REG_MBID_NUM clear, the chip clears the beacon queue after
+each beacon it sends: one beacon goes out after every beacon update and
+then none until the next one. Stations find the AP through probe
+responses, but once associated they get no beacons and leave after ~2 s
+(deauth reason 4, "inactivity"). Seen on the RTL8188EU of a MOD Duo: the
+TBDOK bit of REG_HISR0 was never set while BCNDMAINT0 was set at every
+TBTT.
+
+Set bits 3 and 4 of REG_MBID_NUM when the AP interface is added, as the
+vendor driver (r8188eu, rtw_set_opmode) does.
+
+Applies on top of 0006.
+---
+--- a/rtl8xxxu_core.c
++++ b/rtl8xxxu_core.c
+@@ -6690,6 +6690,15 @@
+ 		rtl8xxxu_write16(priv, REG_TSFTR_SYN_OFFSET, 0x7fff); /* ~32ms */
+ 		rtl8xxxu_write8(priv, REG_DUAL_TSF_RST, DUAL_TSF_RESET_TSF0);
+ 
++		/*
++		 * With bit 3 clear the chip drops the beacon from its queue
++		 * after sending it, and sends no more beacons until the next
++		 * update (the vendor driver sets bits 3 and 4).
++		 */
++		val8 = rtl8xxxu_read8(priv, REG_MBID_NUM);
++		val8 |= BIT(3) | BIT(4);
++		rtl8xxxu_write8(priv, REG_MBID_NUM, val8);
++
+ 		/* enable BCN0 function */
+ 		rtl8xxxu_write8(priv, REG_BEACON_CTRL,
+ 				BEACON_DISABLE_TSF_UPDATE |

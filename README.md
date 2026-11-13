@@ -10,8 +10,8 @@ without a router.
 The MOD Duo X support is **tested only on the `gr-rk3399` board** (kernel
 4.4.167-rt176): the `cl-imx8mq` board (kernel 4.9.123-rt125) is not tested (see
 [MOD Duo X](#mod-duo-x)). On the MOD Duo the module works, but **clients cannot
-connect yet**: the libcrypto of the Duo image computes AES wrong, so the
-WPA2 handshake fails (see [MOD Duo](#mod-duo)).
+connect with the stock image**: its libcrypto computes AES wrong, so the
+WPA2 handshake fails; it works with a fixed libcrypto (see [MOD Duo](#mod-duo)).
 
 ## Layout
 
@@ -50,6 +50,10 @@ sources (the `.c`/`.h` files in `driver/` already include them):
   it, instead of leaving the AP without beacons until the next update.
 - `0006` builds on the Duo X kernels 4.4 and 4.9 (`compat.h` and version
   checks); the 6.1 build (Dwarf, Duo) is unchanged.
+- `0007` keeps the beacon in the chip's queue in AP mode (bits 3 and 4 of
+  `REG_MBID_NUM`, as the vendor driver does): without them the chip sent one
+  beacon after each beacon update and then none, so stations left ~2 s after
+  connecting.
 
 ### Supported chips
 
@@ -363,8 +367,15 @@ The device name is `modduo`.
   qemu (`-cpu cortex-a7` and `-cpu max`), so it is a defect of that build of
   the library, not of the hardware or the kernel; the SHA-256 of busybox and of
   OpenSSH (which don't use libcrypto) are right. The library is the same in
-  v1.13.5.3317 and v1.14.0.3370. WiFi on the Duo needs a working libcrypto
-  (or a wpa_supplicant that doesn't use it).
+  v1.13.5.3317 and v1.14.0.3370. The cause is the ARM assembly of OpenSSL
+  1.0.2g built as Thumb-2 (the default of the compiler): the same sources
+  built with `-marm` (or `no-asm`) give the right AES and SHA-256, and a
+  default build gives the same wrong AES as the image. WiFi on the Duo needs a
+  libcrypto built that way (or a wpa_supplicant that doesn't use it).
+- With such a libcrypto (OpenSSL 1.0.2g, `linux-armv4 shared no-dso no-engine
+  no-hw -marm`, given to the AP wpa_supplicant only with `LD_LIBRARY_PATH`) and
+  patch `0007`, a PC stayed connected for 60 s with a pedalboard running: 60/60
+  pings, 4 ms on average, mod-ui reachable. Without `0007` it left every ~2 s.
 
 ## MOD Duo X
 
