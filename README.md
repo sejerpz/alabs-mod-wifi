@@ -9,9 +9,10 @@ without a router.
 
 The MOD Duo X support is **tested only on the `gr-rk3399` board** (kernel
 4.4.167-rt176): the `cl-imx8mq` board (kernel 4.9.123-rt125) is not tested (see
-[MOD Duo X](#mod-duo-x)). On the MOD Duo the module works, but **clients cannot
-connect with the stock image**: its libcrypto computes AES wrong, so the
-WPA2 handshake fails; it works with a fixed libcrypto (see [MOD Duo](#mod-duo)).
+[MOD Duo X](#mod-duo-x)). On the MOD Duo the access point works with the aLabs
+image from v1.14.0.3370-stls19 on, which replaces the libcrypto of MOD: with
+the libcrypto of the MOD image **clients cannot connect**, it computes AES
+wrong and the WPA2 handshake fails (see [MOD Duo](#mod-duo)).
 
 ## Layout
 
@@ -376,6 +377,14 @@ The device name is `modduo`.
   no-hw -marm`, given to the AP wpa_supplicant only with `LD_LIBRARY_PATH`) and
   patch `0007`, a PC stayed connected for 60 s with a pedalboard running: 60/60
   pings, 4 ms on average, mod-ui reachable. Without `0007` it left every ~2 s.
+- The aLabs image builds that libcrypto for the Duo and puts it in place of
+  the one of MOD, from v1.14.0.3370-stls19 on (OpenSSL 1.0.2g with the
+  `Configure` of the MOD buildroot plus `-marm`, see `build-mod-binaries` in
+  [alabs-mod-custom-images](https://github.com/sejerpz/alabs-mod-custom-images)).
+  With it, on the Duo, `wifi-ap on` as installed by the image: a PC connected
+  and stayed connected for 60 s (60/60 pings, 3.9 ms on average), mod-ui
+  reachable. Its SHA-256 is right too, so it verifies HTTPS certificates
+  (checked under qemu with a CA bundle: the image has no CA certificates).
 
 ## MOD Duo X
 
